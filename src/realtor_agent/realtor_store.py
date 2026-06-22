@@ -45,8 +45,13 @@ def save_realtors_from_normalized(
 
         saved = 0
         change_events_created = 0
+        record_new_realtor_events = _has_existing_realtors(connection)
         for row in latest_normalized_rows:
-            change_events_created += _detect_and_save_changes(connection, row)
+            change_events_created += _detect_and_save_changes(
+                connection,
+                row,
+                record_new_realtor_events=record_new_realtor_events,
+            )
             _upsert_realtor(connection, row, source_run_id=source_run_id)
             saved += 1
 
@@ -149,7 +154,16 @@ def _setup_brokerages_table(connection: sqlite3.Connection) -> None:
     )
 
 
-def _detect_and_save_changes(connection: sqlite3.Connection, row: sqlite3.Row) -> int:
+def _has_existing_realtors(connection: sqlite3.Connection) -> bool:
+    return bool(connection.execute("SELECT 1 FROM realtors LIMIT 1").fetchone())
+
+
+def _detect_and_save_changes(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    record_new_realtor_events: bool,
+) -> int:
     existing = connection.execute(
         """
         SELECT *
@@ -160,6 +174,8 @@ def _detect_and_save_changes(connection: sqlite3.Connection, row: sqlite3.Row) -
     ).fetchone()
 
     if existing is None:
+        if not record_new_realtor_events:
+            return 0
         _save_change_event(
             connection=connection,
             row=row,

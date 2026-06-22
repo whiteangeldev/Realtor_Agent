@@ -231,6 +231,11 @@ realtor-agent --save-realtors
 Before updating a realtor row, the system compares the existing `realtors` row with the
 latest normalized row for that license number.
 
+The first save into an empty `realtors` table is treated as the baseline import.
+It creates current realtor rows, but it does not write one `new_realtor` change
+for every initial record. After that baseline exists, newly appearing licence
+numbers are recorded as `new_realtor` events.
+
 It writes changes into:
 
 ```text
@@ -387,6 +392,10 @@ auto-refresh every 60 seconds
 The dashboard reads the SQLite database live. When scheduled sync creates new
 `change_events` or `source_runs`, the browser updates automatically without
 restarting the dashboard server.
+
+The `Changes` metric shows the number of post-baseline `change_events`. It is
+intended to answer "what changed after we started tracking?", while the
+`Realtors` metric shows the current directory size.
 
 The raw audit data still stays in `change_events`. The dashboard adds readable
 messages such as:

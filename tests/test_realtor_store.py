@@ -21,12 +21,13 @@ def test_save_realtors_creates_current_rows_and_brokerage_rollup(tmp_path: Path)
     assert summary.realtor_rows_saved == 2
     assert summary.removed_realtors == 0
     assert summary.total_realtors == 2
-    assert summary.change_events_created == 2
+    assert summary.change_events_created == 0
 
     with sqlite3.connect(db_path) as connection:
         realtor_count = connection.execute(
             "SELECT COUNT(*) FROM realtors WHERE is_currently_found = 1"
         ).fetchone()[0]
+        change_count = connection.execute("SELECT COUNT(*) FROM change_events").fetchone()[0]
         brokerage = connection.execute(
             """
             SELECT current_realtor_count, not_found_realtor_count, total_realtor_count, city_count
@@ -36,7 +37,46 @@ def test_save_realtors_creates_current_rows_and_brokerage_rollup(tmp_path: Path)
         ).fetchone()
 
     assert realtor_count == 2
+    assert change_count == 0
     assert brokerage == (2, 0, 2, 2)
+
+
+def test_new_realtor_after_baseline_creates_change_event(tmp_path: Path) -> None:
+    db_path = tmp_path / "realtors.db"
+    _replace_normalized_rows(
+        db_path,
+        [
+            _normalized_row("LIC-1", "John Smith", "ABC Realty"),
+        ],
+    )
+    baseline_summary = save_realtors_from_normalized(
+        db_path,
+        detect_removals=True,
+        source_run_id=1,
+    )
+
+    _replace_normalized_rows(
+        db_path,
+        [
+            _normalized_row("LIC-1", "John Smith", "ABC Realty"),
+            _normalized_row("LIC-2", "Jane Lee", "ABC Realty"),
+        ],
+    )
+    summary = save_realtors_from_normalized(db_path, detect_removals=True, source_run_id=2)
+
+    assert baseline_summary.change_events_created == 0
+    assert summary.change_events_created == 1
+
+    with sqlite3.connect(db_path) as connection:
+        event_type = connection.execute(
+            """
+            SELECT event_type
+            FROM change_events
+            WHERE license_number = 'LIC-2'
+            """
+        ).fetchone()[0]
+
+    assert event_type == "new_realtor"
 
 
 def test_missing_realtor_is_marked_not_found_not_deleted(tmp_path: Path) -> None:
