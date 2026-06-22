@@ -59,6 +59,7 @@ def run_sync_once(
         realtor_save = save_realtors_from_normalized(
             db_path,
             detect_removals=_should_detect_removals(query=query, max_pages=max_pages),
+            source_run_id=run_id,
         )
         finished_at = datetime.now(UTC).isoformat()
 

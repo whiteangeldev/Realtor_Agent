@@ -61,6 +61,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 self._send_text(JS, "application/javascript; charset=utf-8")
             elif path == "/api/summary":
                 self._send_json(_get_summary(self.server.db_path))
+            elif path == "/api/filter-options":
+                self._send_json(_get_filter_options(self.server.db_path))
             elif path == "/api/realtors":
                 self._send_json(_search_realtors(self.server.db_path, params))
             elif path == "/api/realtor":
@@ -144,14 +146,108 @@ def _add_column_if_missing(
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
+def _ensure_dashboard_schema(connection: sqlite3.Connection) -> None:
+    if _table_exists(connection, "realtors"):
+        _add_column_if_missing(
+            connection,
+            table_name="realtors",
+            column_name="is_currently_found",
+            column_sql="INTEGER NOT NULL DEFAULT 1",
+        )
+        _add_column_if_missing(
+            connection,
+            table_name="realtors",
+            column_name="removed_at",
+            column_sql="TEXT",
+        )
+        _add_column_if_missing(
+            connection,
+            table_name="realtors",
+            column_name="last_seen_run_id",
+            column_sql="INTEGER",
+        )
+    _setup_brokerages_table(connection)
+    brokerage_count = connection.execute("SELECT COUNT(*) FROM brokerages").fetchone()[0]
+    if brokerage_count == 0 and _table_exists(connection, "realtors"):
+        _rebuild_brokerages(connection)
+
+
+def _setup_brokerages_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS brokerages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            brokerage TEXT NOT NULL UNIQUE,
+            public_address TEXT,
+            public_phone TEXT,
+            managing_broker TEXT,
+            current_realtor_count INTEGER NOT NULL DEFAULT 0,
+            not_found_realtor_count INTEGER NOT NULL DEFAULT 0,
+            total_realtor_count INTEGER NOT NULL DEFAULT 0,
+            city_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _rebuild_brokerages(connection: sqlite3.Connection) -> None:
+    connection.execute("DELETE FROM brokerages")
+    connection.execute(
+        """
+        INSERT INTO brokerages (
+            brokerage,
+            public_address,
+            public_phone,
+            managing_broker,
+            current_realtor_count,
+            not_found_realtor_count,
+            total_realtor_count,
+            city_count,
+            updated_at
+        )
+        SELECT
+            brokerage,
+            MIN(CASE WHEN address IS NOT NULL AND address != '' THEN address END),
+            NULL,
+            NULL,
+            SUM(CASE WHEN is_currently_found = 1 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN is_currently_found = 0 THEN 1 ELSE 0 END),
+            COUNT(*),
+            COUNT(DISTINCT CASE WHEN city IS NOT NULL AND city != '' THEN city END),
+            MAX(updated_at)
+        FROM realtors
+        WHERE brokerage IS NOT NULL AND brokerage != ''
+        GROUP BY brokerage
+        """
+    )
+
+
+def _distinct_values(connection: sqlite3.Connection, column_name: str) -> list[str]:
+    rows = connection.execute(
+        f"""
+        SELECT DISTINCT {column_name}
+        FROM realtors
+        WHERE is_currently_found = 1
+          AND {column_name} IS NOT NULL
+          AND {column_name} != ''
+        ORDER BY {column_name} COLLATE NOCASE
+        """
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
 def _get_summary(db_path: Path) -> dict:
     with _connect(db_path) as connection:
-        realtor_count = connection.execute("SELECT COUNT(*) FROM realtors").fetchone()[0]
+        _ensure_dashboard_schema(connection)
+        realtor_count = connection.execute(
+            "SELECT COUNT(*) FROM realtors WHERE is_currently_found = 1"
+        ).fetchone()[0]
         brokerage_count = connection.execute(
             """
-            SELECT COUNT(DISTINCT brokerage)
-            FROM realtors
-            WHERE brokerage IS NOT NULL AND brokerage != ''
+            SELECT COUNT(*)
+            FROM brokerages
+            WHERE current_realtor_count > 0
             """
         ).fetchone()[0]
         change_count = connection.execute("SELECT COUNT(*) FROM change_events").fetchone()[0]
@@ -173,12 +269,26 @@ def _get_summary(db_path: Path) -> dict:
     }
 
 
+def _get_filter_options(db_path: Path) -> dict:
+    with _connect(db_path) as connection:
+        _ensure_dashboard_schema(connection)
+        statuses = _distinct_values(connection, "status")
+        cities = _distinct_values(connection, "city")
+        categories = _distinct_values(connection, "license_category")
+
+    return {
+        "statuses": statuses,
+        "cities": cities,
+        "categories": categories,
+    }
+
+
 def _search_realtors(db_path: Path, params: dict[str, list[str]]) -> dict:
     search = _param(params, "search")
     page, per_page = _pagination(params)
     offset = (page - 1) * per_page
 
-    where_clause, values = _realtor_where(search)
+    where_clause, values = _realtor_where(params)
     sql = f"""
         SELECT
             license_number,
@@ -186,6 +296,9 @@ def _search_realtors(db_path: Path, params: dict[str, list[str]]) -> dict:
             brokerage,
             status,
             city,
+            license_category,
+            is_currently_found,
+            removed_at,
             updated_at
         FROM realtors
         {where_clause}
@@ -195,6 +308,7 @@ def _search_realtors(db_path: Path, params: dict[str, list[str]]) -> dict:
     count_sql = f"SELECT COUNT(*) FROM realtors {where_clause}"
 
     with _connect(db_path) as connection:
+        _ensure_dashboard_schema(connection)
         total = connection.execute(count_sql, values).fetchone()[0]
         rows = connection.execute(sql, [*values, per_page, offset]).fetchall()
 
@@ -215,6 +329,7 @@ def _get_realtor(db_path: Path, params: dict[str, list[str]]) -> dict:
         raise ValueError("license_number is required")
 
     with _connect(db_path) as connection:
+        _ensure_dashboard_schema(connection)
         realtor = connection.execute(
             """
             SELECT *
@@ -235,31 +350,27 @@ def _search_brokerages(db_path: Path, params: dict[str, list[str]]) -> dict:
     search = _param(params, "search")
     page, per_page = _pagination(params)
     offset = (page - 1) * per_page
-    where_clause, values = _brokerage_where(search)
+    where_clause, values = _brokerage_where(params)
 
     sql = f"""
         SELECT
             brokerage,
-            COUNT(*) AS realtor_count,
-            COUNT(DISTINCT city) AS city_count,
-            MAX(updated_at) AS updated_at
-        FROM realtors
+            public_address,
+            managing_broker,
+            current_realtor_count,
+            not_found_realtor_count,
+            total_realtor_count,
+            city_count,
+            updated_at
+        FROM brokerages
         {where_clause}
-        GROUP BY brokerage
         ORDER BY brokerage COLLATE NOCASE
         LIMIT ? OFFSET ?
     """
-    count_sql = f"""
-        SELECT COUNT(*)
-        FROM (
-            SELECT brokerage
-            FROM realtors
-            {where_clause}
-            GROUP BY brokerage
-        )
-    """
+    count_sql = f"SELECT COUNT(*) FROM brokerages {where_clause}"
 
     with _connect(db_path) as connection:
+        _ensure_dashboard_schema(connection)
         total = connection.execute(count_sql, values).fetchone()[0]
         rows = connection.execute(sql, [*values, per_page, offset]).fetchall()
 
@@ -280,16 +391,21 @@ def _get_brokerage(db_path: Path, params: dict[str, list[str]]) -> dict:
         raise ValueError("brokerage is required")
 
     with _connect(db_path) as connection:
+        _ensure_dashboard_schema(connection)
         summary = connection.execute(
             """
             SELECT
                 brokerage,
-                COUNT(*) AS realtor_count,
-                COUNT(DISTINCT city) AS city_count,
-                MAX(updated_at) AS updated_at
-            FROM realtors
+                public_address,
+                public_phone,
+                managing_broker,
+                current_realtor_count,
+                not_found_realtor_count,
+                total_realtor_count,
+                city_count,
+                updated_at
+            FROM brokerages
             WHERE brokerage = ?
-            GROUP BY brokerage
             """,
             (brokerage,),
         ).fetchone()
@@ -302,6 +418,7 @@ def _get_brokerage(db_path: Path, params: dict[str, list[str]]) -> dict:
                 city
             FROM realtors
             WHERE brokerage = ?
+              AND is_currently_found = 1
             ORDER BY name COLLATE NOCASE
             LIMIT 25
             """,
@@ -320,6 +437,7 @@ def _get_changes(db_path: Path, params: dict[str, list[str]]) -> dict:
     limit = _limit(params, default=50, maximum=200)
 
     with _connect(db_path) as connection:
+        _ensure_dashboard_schema(connection)
         if license_number:
             rows = _changes_for_license(connection, license_number, limit)
         elif brokerage:
@@ -389,8 +507,7 @@ def _get_sync_logs(db_path: Path, params: dict[str, list[str]]) -> dict:
 
 
 def _export_realtors_csv(db_path: Path, params: dict[str, list[str]]) -> str:
-    search = _param(params, "search")
-    where_clause, values = _realtor_where(search)
+    where_clause, values = _realtor_where(params)
 
     sql = f"""
         SELECT
@@ -408,6 +525,8 @@ def _export_realtors_csv(db_path: Path, params: dict[str, list[str]]) -> str:
             normalizer_version,
             first_seen_at,
             last_seen_at,
+            is_currently_found,
+            removed_at,
             updated_at
         FROM realtors
         {where_clause}
@@ -431,11 +550,14 @@ def _export_realtors_csv(db_path: Path, params: dict[str, list[str]]) -> str:
         "normalizer_version",
         "first_seen_at",
         "last_seen_at",
+        "is_currently_found",
+        "removed_at",
         "updated_at",
     ]
     writer.writerow(columns)
 
     with _connect(db_path) as connection:
+        _ensure_dashboard_schema(connection)
         rows = connection.execute(sql, values).fetchall()
         for row in rows:
             writer.writerow([row[column] or "" for column in columns])
@@ -444,27 +566,41 @@ def _export_realtors_csv(db_path: Path, params: dict[str, list[str]]) -> str:
 
 
 def _export_brokerages_csv(db_path: Path, params: dict[str, list[str]]) -> str:
-    search = _param(params, "search")
-    where_clause, values = _brokerage_where(search)
+    where_clause, values = _brokerage_where(params)
 
     sql = f"""
         SELECT
             brokerage,
-            COUNT(*) AS realtor_count,
-            COUNT(DISTINCT city) AS city_count,
-            MAX(updated_at) AS updated_at
-        FROM realtors
+            public_address,
+            public_phone,
+            managing_broker,
+            current_realtor_count,
+            not_found_realtor_count,
+            total_realtor_count,
+            city_count,
+            updated_at
+        FROM brokerages
         {where_clause}
-        GROUP BY brokerage
         ORDER BY brokerage COLLATE NOCASE
     """
 
     output = io.StringIO()
     writer = csv.writer(output)
-    columns = ["brokerage", "realtor_count", "city_count", "updated_at"]
+    columns = [
+        "brokerage",
+        "public_address",
+        "public_phone",
+        "managing_broker",
+        "current_realtor_count",
+        "not_found_realtor_count",
+        "total_realtor_count",
+        "city_count",
+        "updated_at",
+    ]
     writer.writerow(columns)
 
     with _connect(db_path) as connection:
+        _ensure_dashboard_schema(connection)
         rows = connection.execute(sql, values).fetchall()
         for row in rows:
             writer.writerow([row[column] or "" for column in columns])
@@ -489,19 +625,61 @@ def _changes_for_license(
     ).fetchall()
 
 
-def _realtor_where(search: str) -> tuple[str, list[str]]:
+def _realtor_where(params: dict[str, list[str]]) -> tuple[str, list[str]]:
+    search = _param(params, "search")
+    found = _param(params, "found", "current")
+    status = _param(params, "status")
+    city = _param(params, "city")
+    category = _param(params, "category")
+
+    clauses = []
+    values = []
+
+    if found == "not_found":
+        clauses.append("is_currently_found = 0")
+    elif found != "all":
+        clauses.append("is_currently_found = 1")
+
     if not search:
+        pass
+    else:
+        like = f"%{search}%"
+        clauses.append("(name LIKE ? OR license_number LIKE ?)")
+        values.extend([like, like])
+
+    if status:
+        clauses.append("status = ?")
+        values.append(status)
+    if city:
+        clauses.append("city = ?")
+        values.append(city)
+    if category:
+        clauses.append("license_category = ?")
+        values.append(category)
+
+    if not clauses:
         return "", []
-
-    like = f"%{search}%"
-    return "WHERE name LIKE ? OR license_number LIKE ?", [like, like]
+    return f"WHERE {' AND '.join(clauses)}", values
 
 
-def _brokerage_where(search: str) -> tuple[str, list[str]]:
-    base = "WHERE brokerage IS NOT NULL AND brokerage != ''"
-    if not search:
-        return base, []
-    return f"{base} AND brokerage LIKE ?", [f"%{search}%"]
+def _brokerage_where(params: dict[str, list[str]]) -> tuple[str, list[str]]:
+    search = _param(params, "search")
+    found = _param(params, "found", "current")
+
+    clauses = ["brokerage IS NOT NULL", "brokerage != ''"]
+    values = []
+
+    if found == "not_found":
+        clauses.append("current_realtor_count = 0")
+        clauses.append("not_found_realtor_count > 0")
+    elif found != "all":
+        clauses.append("current_realtor_count > 0")
+
+    if search:
+        clauses.append("brokerage LIKE ?")
+        values.append(f"%{search}%")
+
+    return f"WHERE {' AND '.join(clauses)}", values
 
 
 def _param(params: dict[str, list[str]], name: str, default: str = "") -> str:
@@ -615,6 +793,36 @@ HTML = """<!doctype html>
           </div>
           <button type="submit">Search</button>
         </form>
+
+        <div class="filterbar" aria-label="Directory filters">
+          <label>
+            <span>Record state</span>
+            <select id="foundFilter">
+              <option value="current">Current</option>
+              <option value="not_found">Not found</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <label class="realtor-filter">
+            <span>Status</span>
+            <select id="statusFilter">
+              <option value="">All statuses</option>
+            </select>
+          </label>
+          <label class="realtor-filter">
+            <span>City</span>
+            <select id="cityFilter">
+              <option value="">All cities</option>
+            </select>
+          </label>
+          <label class="realtor-filter">
+            <span>Category</span>
+            <select id="categoryFilter">
+              <option value="">All categories</option>
+            </select>
+          </label>
+          <button type="button" class="ghost-button" id="clearFilters">Clear</button>
+        </div>
 
         <div class="pager" aria-label="Result pagination">
           <span id="pageInfo">0 rows</span>
@@ -866,6 +1074,31 @@ main {
   color: var(--muted);
   font-size: 12px;
   font-weight: 760;
+}
+
+.filterbar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr)) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-alt);
+}
+
+.filterbar label {
+  display: grid;
+  gap: 5px;
+}
+
+.filterbar span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.hidden {
+  display: none !important;
 }
 
 input,
@@ -1222,6 +1455,10 @@ tbody tr.selected {
     grid-template-columns: 1fr;
   }
 
+  .filterbar {
+    grid-template-columns: 1fr;
+  }
+
   .segments {
     width: 100%;
   }
@@ -1274,6 +1511,10 @@ const MODE_SUBTITLES = {
 const state = {
   search: "",
   mode: "realtor",
+  found: "current",
+  status: "",
+  city: "",
+  category: "",
   page: 1,
   perPage: 50,
   totalPages: 1,
@@ -1285,6 +1526,11 @@ const state = {
 const nodes = {
   searchForm: document.getElementById("searchForm"),
   searchInput: document.getElementById("searchInput"),
+  foundFilter: document.getElementById("foundFilter"),
+  statusFilter: document.getElementById("statusFilter"),
+  cityFilter: document.getElementById("cityFilter"),
+  categoryFilter: document.getElementById("categoryFilter"),
+  clearFilters: document.getElementById("clearFilters"),
   resultTitle: document.getElementById("resultTitle"),
   resultSubtitle: document.getElementById("resultSubtitle"),
   resultHeader: document.getElementById("resultHeader"),
@@ -1340,6 +1586,28 @@ nodes.prevPage.addEventListener("click", () => setPage(state.page - 1));
 nodes.nextPage.addEventListener("click", () => setPage(state.page + 1));
 nodes.refreshButton.addEventListener("click", () => refreshDashboard({ silent: false }));
 
+[nodes.foundFilter, nodes.statusFilter, nodes.cityFilter, nodes.categoryFilter].forEach((filter) => {
+  filter.addEventListener("change", () => {
+    readFilters();
+    state.page = 1;
+    clearSelection();
+    updateExportLink();
+    loadResults();
+  });
+});
+
+nodes.clearFilters.addEventListener("click", () => {
+  nodes.foundFilter.value = "current";
+  nodes.statusFilter.value = "";
+  nodes.cityFilter.value = "";
+  nodes.categoryFilter.value = "";
+  readFilters();
+  state.page = 1;
+  clearSelection();
+  updateExportLink();
+  loadResults();
+});
+
 function currentMode() {
   const checkedMode = document.querySelector('input[name="mode"]:checked');
   return checkedMode ? checkedMode.value : "realtor";
@@ -1372,6 +1640,9 @@ function updateModeUI() {
   nodes.searchInput.placeholder = PLACEHOLDERS[state.mode] || PLACEHOLDERS.realtor;
   nodes.resultTitle.textContent = MODE_TITLES[state.mode] || MODE_TITLES.realtor;
   nodes.resultSubtitle.textContent = MODE_SUBTITLES[state.mode] || MODE_SUBTITLES.realtor;
+  document.querySelectorAll(".realtor-filter").forEach((node) => {
+    node.classList.toggle("hidden", state.mode === "brokerage");
+  });
   renderHeaders();
 }
 
@@ -1380,13 +1651,30 @@ function updateExportLink() {
   if (state.search) {
     params.set("search", state.search);
   }
+  params.set("found", state.found);
   if (state.mode === "brokerage") {
     nodes.exportLink.href = `/export/brokerages.csv?${params.toString()}`;
     nodes.exportLink.textContent = "Export Brokerages CSV";
     return;
   }
+  if (state.status) {
+    params.set("status", state.status);
+  }
+  if (state.city) {
+    params.set("city", state.city);
+  }
+  if (state.category) {
+    params.set("category", state.category);
+  }
   nodes.exportLink.href = `/export/realtors.csv?${params.toString()}`;
   nodes.exportLink.textContent = "Export Realtors CSV";
+}
+
+function readFilters() {
+  state.found = nodes.foundFilter.value;
+  state.status = nodes.statusFilter.value;
+  state.city = nodes.cityFilter.value;
+  state.category = nodes.categoryFilter.value;
 }
 
 function setRefreshStatus(message) {
@@ -1471,6 +1759,33 @@ function loadSummary() {
   });
 }
 
+function loadFilterOptions() {
+  return api("/api/filter-options").then((options) => {
+    setOptions(nodes.statusFilter, options.statuses, "All statuses");
+    setOptions(nodes.cityFilter, options.cities, "All cities");
+    setOptions(nodes.categoryFilter, options.categories, "All categories");
+  });
+}
+
+function setOptions(select, values, emptyLabel) {
+  const currentValue = select.value;
+  select.replaceChildren();
+  const emptyOption = document.createElement("option");
+  emptyOption.value = "";
+  emptyOption.textContent = emptyLabel;
+  select.appendChild(emptyOption);
+
+  values.forEach((value) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    select.appendChild(option);
+  });
+
+  select.value = values.includes(currentValue) ? currentValue : "";
+  readFilters();
+}
+
 function loadResults(options = {}) {
   renderHeaders();
   if (state.mode === "brokerage") {
@@ -1485,7 +1800,10 @@ function loadRealtors(options = {}) {
   }
   return api("/api/realtors", {
     search: state.search,
-    mode: state.mode,
+    found: state.found,
+    status: state.status,
+    city: state.city,
+    category: state.category,
     page: state.page,
     per_page: state.perPage,
   }).then((payload) => {
@@ -1505,7 +1823,7 @@ function loadRealtors(options = {}) {
       setCell(row, realtor.name);
       setCell(row, realtor.license_number);
       setCell(row, realtor.brokerage);
-      setCell(row, realtor.status);
+      setCell(row, realtor.is_currently_found ? realtor.status : "Not found");
       setCell(row, realtor.city);
       nodes.resultRows.appendChild(row);
     });
@@ -1524,6 +1842,7 @@ function loadBrokerages(options = {}) {
   }
   return api("/api/brokerages", {
     search: state.search,
+    found: state.found,
     page: state.page,
     per_page: state.perPage,
   }).then((payload) => {
@@ -1541,7 +1860,7 @@ function loadBrokerages(options = {}) {
       row.dataset.brokerage = brokerage.brokerage;
       row.addEventListener("click", () => selectBrokerage(brokerage.brokerage));
       setCell(row, brokerage.brokerage);
-      setCell(row, brokerage.realtor_count.toLocaleString());
+      setCell(row, brokerage.current_realtor_count.toLocaleString());
       setCell(row, brokerage.city_count.toLocaleString());
       setCell(row, formatDate(brokerage.updated_at));
       nodes.resultRows.appendChild(row);
@@ -1629,6 +1948,7 @@ function renderProfile(realtor) {
   fields.className = "field-list";
   [
     ["Brokerage", realtor.brokerage],
+    ["Record State", realtor.is_currently_found ? "Current" : "Not found"],
     ["Status", realtor.status],
     ["City", realtor.city],
     ["Address", realtor.address],
@@ -1638,6 +1958,7 @@ function renderProfile(realtor) {
     ["Normalizer", realtor.normalizer_version],
     ["First Seen", formatDate(realtor.first_seen_at)],
     ["Last Seen", formatDate(realtor.last_seen_at)],
+    ["Removed At", formatDate(realtor.removed_at)],
   ].forEach(([label, value]) => {
     const field = document.createElement("div");
     field.className = "field";
@@ -1668,14 +1989,18 @@ function renderBrokerageProfile(payload) {
   const name = document.createElement("strong");
   name.textContent = brokerage.brokerage;
   const subtitle = document.createElement("span");
-  subtitle.textContent = `${brokerage.realtor_count.toLocaleString()} realtors`;
+  subtitle.textContent = `${brokerage.current_realtor_count.toLocaleString()} current realtors`;
   title.append(name, subtitle);
 
   const fields = document.createElement("div");
   fields.className = "field-list";
   [
-    ["Realtors", brokerage.realtor_count.toLocaleString()],
+    ["Current", brokerage.current_realtor_count.toLocaleString()],
+    ["Not Found", brokerage.not_found_realtor_count.toLocaleString()],
+    ["Total Seen", brokerage.total_realtor_count.toLocaleString()],
     ["Cities", brokerage.city_count.toLocaleString()],
+    ["Address", brokerage.public_address],
+    ["Managing Broker", brokerage.managing_broker],
     ["Last Updated", formatDate(brokerage.updated_at)],
   ].forEach(([label, value]) => {
     const field = document.createElement("div");
@@ -1801,10 +2126,12 @@ function refreshDashboard(options = {}) {
 function boot() {
   updateModeUI();
   updateExportLink();
-  refreshDashboard({ silent: false }).catch((error) => {
-    nodes.lastUpdated.textContent = error.message;
-    nodes.lastUpdated.className = "danger";
-  });
+  loadFilterOptions()
+    .then(() => refreshDashboard({ silent: false }))
+    .catch((error) => {
+      nodes.lastUpdated.textContent = error.message;
+      nodes.lastUpdated.className = "danger";
+    });
   window.setInterval(() => refreshDashboard({ silent: true }), AUTO_REFRESH_MS);
 }
 

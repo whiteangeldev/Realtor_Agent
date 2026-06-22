@@ -206,6 +206,9 @@ source_fetched_at
 normalizer_version
 first_seen_at
 last_seen_at
+is_currently_found
+removed_at
+last_seen_run_id
 updated_at
 ```
 
@@ -242,6 +245,8 @@ brokerage_changed
 status_changed
 location_changed
 profile_changed
+removed_realtor
+reappeared_realtor
 ```
 
 Tracked fields:
@@ -318,12 +323,22 @@ realtor-agent --sync-now
 ```
 
 A full sync normalizes only the raw pages from that sync and removes realtor rows
-that no longer exist in the latest BCFSA result set. Removed rows are recorded in
-`change_events` as:
+that no longer exist in the latest BCFSA result set from the current directory.
+The row is not deleted. It is marked as:
+
+```text
+is_currently_found = 0
+removed_at = timestamp
+```
+
+Removed rows are also recorded in `change_events` as:
 
 ```text
 removed_realtor
 ```
+
+The dashboard shows current records by default, but the `Record state` filter can
+show `Current`, `Not found`, or `All`.
 
 ## Step 8: Dashboard
 
@@ -344,6 +359,10 @@ Current dashboard features:
 ```text
 search realtor
 search brokerage
+filter by record state
+filter by licence status
+filter by city
+filter by licence category
 rows per page
 previous/next pagination
 view profile
@@ -362,6 +381,21 @@ Dashboard search modes:
 ```text
 Realtors   -> searches realtor name and licence number
 Brokerages -> shows brokerage rows and searches brokerage name
+```
+
+The `brokerages` table is rebuilt from saved realtor records after each sync. It
+stores:
+
+```text
+brokerage
+public_address
+public_phone
+managing_broker
+current_realtor_count
+not_found_realtor_count
+total_realtor_count
+city_count
+updated_at
 ```
 
 Optional settings:

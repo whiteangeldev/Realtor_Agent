@@ -17,11 +17,13 @@ def save_realtors_from_normalized(
     db_path: Path,
     *,
     detect_removals: bool = True,
+    source_run_id: int | None = None,
 ) -> RealtorSaveSummary:
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         _setup_realtors_table(connection)
         _setup_change_events_table(connection)
+        _setup_brokerages_table(connection)
 
         latest_normalized_rows = connection.execute(
             """
@@ -45,7 +47,7 @@ def save_realtors_from_normalized(
         change_events_created = 0
         for row in latest_normalized_rows:
             change_events_created += _detect_and_save_changes(connection, row)
-            _upsert_realtor(connection, row)
+            _upsert_realtor(connection, row, source_run_id=source_run_id)
             saved += 1
 
         removed = 0
@@ -53,7 +55,11 @@ def save_realtors_from_normalized(
             removed = _detect_and_remove_missing_realtors(connection, latest_normalized_rows)
             change_events_created += removed
 
-        total_realtors = connection.execute("SELECT COUNT(*) FROM realtors").fetchone()[0]
+        _rebuild_brokerages(connection)
+
+        total_realtors = connection.execute(
+            "SELECT COUNT(*) FROM realtors WHERE is_currently_found = 1"
+        ).fetchone()[0]
         return RealtorSaveSummary(
             normalized_rows_checked=len(latest_normalized_rows),
             realtor_rows_saved=saved,
@@ -86,6 +92,24 @@ def _setup_realtors_table(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    _add_column_if_missing(
+        connection,
+        table_name="realtors",
+        column_name="is_currently_found",
+        column_sql="INTEGER NOT NULL DEFAULT 1",
+    )
+    _add_column_if_missing(
+        connection,
+        table_name="realtors",
+        column_name="removed_at",
+        column_sql="TEXT",
+    )
+    _add_column_if_missing(
+        connection,
+        table_name="realtors",
+        column_name="last_seen_run_id",
+        column_sql="INTEGER",
+    )
 
 
 def _setup_change_events_table(connection: sqlite3.Connection) -> None:
@@ -101,6 +125,25 @@ def _setup_change_events_table(connection: sqlite3.Connection) -> None:
             source TEXT NOT NULL,
             normalizer_version TEXT NOT NULL,
             detected_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _setup_brokerages_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS brokerages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            brokerage TEXT NOT NULL UNIQUE,
+            public_address TEXT,
+            public_phone TEXT,
+            managing_broker TEXT,
+            current_realtor_count INTEGER NOT NULL DEFAULT 0,
+            not_found_realtor_count INTEGER NOT NULL DEFAULT 0,
+            total_realtor_count INTEGER NOT NULL DEFAULT 0,
+            city_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
         )
         """
     )
@@ -128,6 +171,17 @@ def _detect_and_save_changes(connection: sqlite3.Connection, row: sqlite3.Row) -
         return 1
 
     changes = 0
+    if existing["is_currently_found"] == 0:
+        _save_change_event(
+            connection=connection,
+            row=row,
+            event_type="reappeared_realtor",
+            field_name=None,
+            old_value="not_found",
+            new_value="found",
+        )
+        changes += 1
+
     for field_name in _TRACKED_FIELDS:
         old_value = existing[field_name]
         new_value = row[field_name]
@@ -150,22 +204,37 @@ def _detect_and_remove_missing_realtors(
     latest_normalized_rows: list[sqlite3.Row],
 ) -> int:
     current_license_numbers = {row["license_number"] for row in latest_normalized_rows}
-    placeholders = ",".join("?" for _ in current_license_numbers)
+    connection.execute("DROP TABLE IF EXISTS current_sync_licenses")
+    connection.execute("CREATE TEMP TABLE current_sync_licenses (license_number TEXT PRIMARY KEY)")
+    connection.executemany(
+        "INSERT INTO current_sync_licenses (license_number) VALUES (?)",
+        ((license_number,) for license_number in current_license_numbers),
+    )
     missing_realtors = connection.execute(
-        f"""
-        SELECT *
+        """
+        SELECT realtors.*
         FROM realtors
-        WHERE license_number NOT IN ({placeholders})
-        """,
-        tuple(current_license_numbers),
+        LEFT JOIN current_sync_licenses
+          ON current_sync_licenses.license_number = realtors.license_number
+        WHERE realtors.is_currently_found = 1
+          AND current_sync_licenses.license_number IS NULL
+        """
     ).fetchall()
 
     removed = 0
+    now = datetime.now(UTC).isoformat()
     for realtor in missing_realtors:
-        _save_removed_realtor_event(connection, realtor)
+        _save_removed_realtor_event(connection, realtor, detected_at=now)
         connection.execute(
-            "DELETE FROM realtors WHERE license_number = ?",
-            (realtor["license_number"],),
+            """
+            UPDATE realtors
+            SET
+                is_currently_found = 0,
+                removed_at = ?,
+                updated_at = ?
+            WHERE license_number = ?
+            """,
+            (now, now, realtor["license_number"]),
         )
         removed += 1
     return removed
@@ -227,7 +296,12 @@ def _save_change_event(
     )
 
 
-def _save_removed_realtor_event(connection: sqlite3.Connection, realtor: sqlite3.Row) -> None:
+def _save_removed_realtor_event(
+    connection: sqlite3.Connection,
+    realtor: sqlite3.Row,
+    *,
+    detected_at: str,
+) -> None:
     connection.execute(
         """
         INSERT INTO change_events (
@@ -250,7 +324,7 @@ def _save_removed_realtor_event(connection: sqlite3.Connection, realtor: sqlite3
             None,
             realtor["source"],
             realtor["normalizer_version"],
-            datetime.now(UTC).isoformat(),
+            detected_at,
         ),
     )
 
@@ -261,7 +335,12 @@ def _clean(value: str | None) -> str:
     return " ".join(str(value).strip().split())
 
 
-def _upsert_realtor(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
+def _upsert_realtor(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    source_run_id: int | None,
+) -> None:
     now = datetime.now(UTC).isoformat()
     connection.execute(
         """
@@ -280,9 +359,12 @@ def _upsert_realtor(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
             normalizer_version,
             first_seen_at,
             last_seen_at,
-            updated_at
+            updated_at,
+            is_currently_found,
+            removed_at,
+            last_seen_run_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(license_number) DO UPDATE SET
             name = excluded.name,
             brokerage = excluded.brokerage,
@@ -296,7 +378,10 @@ def _upsert_realtor(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
             source_fetched_at = excluded.source_fetched_at,
             normalizer_version = excluded.normalizer_version,
             last_seen_at = excluded.last_seen_at,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            is_currently_found = excluded.is_currently_found,
+            removed_at = excluded.removed_at,
+            last_seen_run_id = excluded.last_seen_run_id
         """,
         (
             row["license_number"],
@@ -314,5 +399,56 @@ def _upsert_realtor(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
             now,
             now,
             now,
+            1,
+            None,
+            source_run_id,
         ),
     )
+
+
+def _rebuild_brokerages(connection: sqlite3.Connection) -> None:
+    now = datetime.now(UTC).isoformat()
+    connection.execute("DELETE FROM brokerages")
+    connection.execute(
+        """
+        INSERT INTO brokerages (
+            brokerage,
+            public_address,
+            public_phone,
+            managing_broker,
+            current_realtor_count,
+            not_found_realtor_count,
+            total_realtor_count,
+            city_count,
+            updated_at
+        )
+        SELECT
+            brokerage,
+            MIN(CASE WHEN address IS NOT NULL AND address != '' THEN address END),
+            NULL,
+            NULL,
+            SUM(CASE WHEN is_currently_found = 1 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN is_currently_found = 0 THEN 1 ELSE 0 END),
+            COUNT(*),
+            COUNT(DISTINCT CASE WHEN city IS NOT NULL AND city != '' THEN city END),
+            ?
+        FROM realtors
+        WHERE brokerage IS NOT NULL AND brokerage != ''
+        GROUP BY brokerage
+        """,
+        (now,),
+    )
+
+
+def _add_column_if_missing(
+    connection: sqlite3.Connection,
+    *,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    columns = {
+        row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name not in columns:
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
