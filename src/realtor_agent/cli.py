@@ -32,7 +32,8 @@ def main() -> None:
             "Saved realtor records from normalized rows. "
             f"Checked: {summary.normalized_rows_checked}. "
             f"Saved/updated: {summary.realtor_rows_saved}. "
-            f"Total realtors: {summary.total_realtors}."
+            f"Total realtors: {summary.total_realtors}. "
+            f"Change events: {summary.change_events_created}."
         )
         return
 

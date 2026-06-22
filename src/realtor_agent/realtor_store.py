@@ -9,31 +9,46 @@ class RealtorSaveSummary:
     normalized_rows_checked: int
     realtor_rows_saved: int
     total_realtors: int
+    change_events_created: int
 
 
 def save_realtors_from_normalized(db_path: Path) -> RealtorSaveSummary:
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         _setup_realtors_table(connection)
+        _setup_change_events_table(connection)
 
-        normalized_rows = connection.execute(
+        latest_normalized_rows = connection.execute(
             """
+            WITH latest_normalized AS (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY license_number
+                        ORDER BY source_fetched_at DESC, id DESC
+                    ) AS row_number
+                FROM normalized_realtors
+            )
             SELECT *
-            FROM normalized_realtors
+            FROM latest_normalized
+            WHERE row_number = 1
             ORDER BY id
             """
         ).fetchall()
 
         saved = 0
-        for row in normalized_rows:
+        change_events_created = 0
+        for row in latest_normalized_rows:
+            change_events_created += _detect_and_save_changes(connection, row)
             _upsert_realtor(connection, row)
             saved += 1
 
         total_realtors = connection.execute("SELECT COUNT(*) FROM realtors").fetchone()[0]
         return RealtorSaveSummary(
-            normalized_rows_checked=len(normalized_rows),
+            normalized_rows_checked=len(latest_normalized_rows),
             realtor_rows_saved=saved,
             total_realtors=total_realtors,
+            change_events_created=change_events_created,
         )
 
 
@@ -60,6 +75,125 @@ def _setup_realtors_table(connection: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _setup_change_events_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS change_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            license_number TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            field_name TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            source TEXT NOT NULL,
+            normalizer_version TEXT NOT NULL,
+            detected_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _detect_and_save_changes(connection: sqlite3.Connection, row: sqlite3.Row) -> int:
+    existing = connection.execute(
+        """
+        SELECT *
+        FROM realtors
+        WHERE license_number = ?
+        """,
+        (row["license_number"],),
+    ).fetchone()
+
+    if existing is None:
+        _save_change_event(
+            connection=connection,
+            row=row,
+            event_type="new_realtor",
+            field_name=None,
+            old_value=None,
+            new_value=row["license_number"],
+        )
+        return 1
+
+    changes = 0
+    for field_name in _TRACKED_FIELDS:
+        old_value = existing[field_name]
+        new_value = row[field_name]
+        if _clean(old_value) == _clean(new_value):
+            continue
+        _save_change_event(
+            connection=connection,
+            row=row,
+            event_type=_event_type_for_field(field_name),
+            field_name=field_name,
+            old_value=old_value,
+            new_value=new_value,
+        )
+        changes += 1
+    return changes
+
+
+_TRACKED_FIELDS = (
+    "name",
+    "brokerage",
+    "status",
+    "city",
+    "address",
+    "license_level",
+    "license_category",
+)
+
+
+def _event_type_for_field(field_name: str) -> str:
+    return {
+        "brokerage": "brokerage_changed",
+        "status": "status_changed",
+        "city": "location_changed",
+        "address": "location_changed",
+    }.get(field_name, "profile_changed")
+
+
+def _save_change_event(
+    *,
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    event_type: str,
+    field_name: str | None,
+    old_value: str | None,
+    new_value: str | None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO change_events (
+            license_number,
+            event_type,
+            field_name,
+            old_value,
+            new_value,
+            source,
+            normalizer_version,
+            detected_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            row["license_number"],
+            event_type,
+            field_name,
+            old_value,
+            new_value,
+            row["source"],
+            row["normalizer_version"],
+            datetime.now(UTC).isoformat(),
+        ),
+    )
+
+
+def _clean(value: str | None) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().split())
 
 
 def _upsert_realtor(connection: sqlite3.Connection, row: sqlite3.Row) -> None:

@@ -217,6 +217,45 @@ license_number
 
 If the same license number already exists, the row is updated instead of duplicated.
 
+## Step 6: Change Detection
+
+Change detection runs during:
+
+```bash
+realtor-agent --save-realtors
+```
+
+Before updating a realtor row, the system compares the existing `realtors` row with the
+latest normalized row for that license number.
+
+It writes changes into:
+
+```text
+change_events
+```
+
+Detected events include:
+
+```text
+new_realtor
+brokerage_changed
+status_changed
+location_changed
+profile_changed
+```
+
+Tracked fields:
+
+```text
+name
+brokerage
+status
+city
+address
+license_level
+license_category
+```
+
 ## Required `.env` Settings
 
 ```env
@@ -228,4 +267,4 @@ BCFSA_ALGOLIA_FILTERS=...
 
 ## Next Step
 
-Step 6 will compare old and new realtor values and write `change_events`.
+Next step will be a small query/export layer for inspecting realtors and change events.
