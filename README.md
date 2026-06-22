@@ -104,6 +104,33 @@ fetch_status
 fetched_at
 ```
 
+## Step 3: Validation
+
+Validate stored raw snapshots before normalizing or saving realtor records:
+
+```bash
+realtor-agent --validate-raw
+```
+
+Validation checks each raw realtor record for:
+
+```text
+licence number
+name
+brokerage name
+source timestamp
+malformed record shape
+basic field types
+```
+
+Bad records are written to:
+
+```text
+normalization_errors
+```
+
+Good records are only counted for now. They are not inserted into a realtor table yet.
+
 ## Required `.env` Settings
 
 ```env
@@ -115,4 +142,4 @@ BCFSA_ALGOLIA_FILTERS=...
 
 ## Next Step
 
-Step 2 will store this raw JSON into a `raw_snapshots` table.
+Step 4 will normalize valid BCFSA records into a standard realtor format.

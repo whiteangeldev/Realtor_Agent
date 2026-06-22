@@ -4,6 +4,7 @@ from pathlib import Path
 
 from realtor_agent.raw_snapshot_store import RawSnapshotStore
 from realtor_agent.source_adapters import BCFSAAlgoliaAdapter
+from realtor_agent.validation import validate_raw_snapshots
 
 DEFAULT_DB_PATH = Path("data/realtor_agent.db")
 
@@ -17,8 +18,21 @@ def main() -> None:
     parser.add_argument("--max-pages", type=int, help="Safety limit when using --all.")
     parser.add_argument("--output", type=Path, help="Optional file path to save raw JSON.")
     parser.add_argument("--store-raw", action="store_true", help="Save raw response(s) to SQLite.")
+    parser.add_argument("--validate-raw", action="store_true", help="Validate stored raw snapshots.")
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH, help="SQLite database path.")
     args = parser.parse_args()
+
+    if args.validate_raw:
+        summary = validate_raw_snapshots(args.db_path)
+        print(
+            "Validated "
+            f"{summary.records_checked} record(s) "
+            f"from {summary.snapshots_checked} raw snapshot(s). "
+            f"Valid: {summary.valid_records}. "
+            f"Invalid: {summary.invalid_records}."
+        )
+        print(f"Errors were stored in normalization_errors inside {args.db_path}")
+        return
 
     adapter = BCFSAAlgoliaAdapter()
     if args.store_raw:
