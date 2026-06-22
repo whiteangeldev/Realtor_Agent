@@ -82,7 +82,7 @@ realtor-agent --query smith --hits-per-page 2 --store-raw
 Store multiple raw pages:
 
 ```bash
-realtor-agent --all --hits-per-page 1000 --max-pages 2 --store-raw
+realtor-agent --all --hits-per-page 1000 --store-raw
 ```
 
 This creates:
@@ -366,7 +366,7 @@ The dashboard opens a small web server on all network interfaces by default:
 On a VPS, open it from your browser with:
 
 ```text
-http://YOUR_VPS_IP:8765
+http://YOUR_IP:8765
 ```
 
 The dashboard reads from:
