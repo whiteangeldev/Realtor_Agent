@@ -9,15 +9,22 @@ from urllib.parse import parse_qs, urlparse
 
 
 DEFAULT_DASHBOARD_PORT = 8765
+DEFAULT_DASHBOARD_HOST = "0.0.0.0"
 
 
-def run_dashboard(db_path: Path, host: str = "127.0.0.1", port: int = DEFAULT_DASHBOARD_PORT) -> None:
+def run_dashboard(
+    db_path: Path,
+    host: str = DEFAULT_DASHBOARD_HOST,
+    port: int = DEFAULT_DASHBOARD_PORT,
+) -> None:
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
     server = _make_server(host=host, port=port, db_path=db_path)
     url = f"http://{host}:{server.server_port}"
     print(f"Dashboard running at {url}", flush=True)
+    if host == DEFAULT_DASHBOARD_HOST:
+        print(f"Use http://<your-vps-ip>:{server.server_port} from your browser.", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
 
     try:

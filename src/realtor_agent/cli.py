@@ -2,7 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
-from realtor_agent.dashboard import DEFAULT_DASHBOARD_PORT, run_dashboard
+from realtor_agent.dashboard import DEFAULT_DASHBOARD_HOST, DEFAULT_DASHBOARD_PORT, run_dashboard
 from realtor_agent.normalization import normalize_raw_snapshots
 from realtor_agent.raw_snapshot_store import RawSnapshotStore
 from realtor_agent.realtor_store import save_realtors_from_normalized
@@ -42,7 +42,7 @@ def main() -> None:
     )
     parser.add_argument("--dashboard", action="store_true", help="Start the local dashboard.")
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH, help="SQLite database path.")
-    parser.add_argument("--host", default="127.0.0.1", help="Dashboard host.")
+    parser.add_argument("--host", default=DEFAULT_DASHBOARD_HOST, help="Dashboard host.")
     parser.add_argument("--port", type=int, default=DEFAULT_DASHBOARD_PORT, help="Dashboard port.")
     args = parser.parse_args()
 

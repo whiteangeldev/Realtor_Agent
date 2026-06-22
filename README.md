@@ -348,7 +348,19 @@ Start the local dashboard:
 realtor-agent --dashboard
 ```
 
-The dashboard opens a small local web server and reads from:
+The dashboard opens a small web server on all network interfaces by default:
+
+```text
+0.0.0.0:8765
+```
+
+On a VPS, open it from your browser with:
+
+```text
+http://YOUR_VPS_IP:8765
+```
+
+The dashboard reads from:
 
 ```text
 data/realtor_agent.db
@@ -409,8 +421,11 @@ updated_at
 Optional settings:
 
 ```bash
+realtor-agent --dashboard --port 8765
 realtor-agent --dashboard --host 127.0.0.1 --port 8765
 ```
+
+Use `--host 127.0.0.1` only when you intentionally want local-only access.
 
 ## Automated Tests
 
