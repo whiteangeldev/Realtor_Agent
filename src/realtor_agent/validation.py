@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+VALIDATOR_VERSION = "raw_validator_v1"
+
 
 @dataclass(frozen=True)
 class ValidationSummary:
@@ -18,6 +20,13 @@ def validate_raw_snapshots(db_path: Path) -> ValidationSummary:
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         _setup_errors_table(connection)
+        if _table_exists(connection, "raw_snapshots"):
+            _add_column_if_missing(
+                connection,
+                table_name="raw_snapshots",
+                column_name="adapter_version",
+                column_sql="TEXT NOT NULL DEFAULT 'unknown'",
+            )
         connection.execute("DELETE FROM normalization_errors")
 
         if not _table_exists(connection, "raw_snapshots"):
@@ -47,7 +56,7 @@ def validate_raw_snapshots(db_path: Path) -> ValidationSummary:
                     connection=connection,
                     snapshot=snapshot,
                     record_index=None,
-                    raw_record={"raw_json": snapshot["raw_json"]},
+            raw_record={"raw_json": snapshot["raw_json"]},
                     errors=snapshot_errors,
                 )
                 invalid_records += 1
@@ -85,6 +94,7 @@ def _setup_errors_table(connection: sqlite3.Connection) -> None:
             raw_snapshot_id INTEGER NOT NULL,
             record_index INTEGER,
             source TEXT NOT NULL,
+            validator_version TEXT NOT NULL,
             licence_number TEXT,
             error_message TEXT NOT NULL,
             raw_record TEXT NOT NULL,
@@ -92,6 +102,12 @@ def _setup_errors_table(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (raw_snapshot_id) REFERENCES raw_snapshots(id)
         )
         """
+    )
+    _add_column_if_missing(
+        connection,
+        table_name="normalization_errors",
+        column_name="validator_version",
+        column_sql="TEXT NOT NULL DEFAULT 'unknown'",
     )
 
 
@@ -105,6 +121,20 @@ def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
         (table_name,),
     ).fetchone()
     return row is not None
+
+
+def _add_column_if_missing(
+    connection: sqlite3.Connection,
+    *,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    columns = {
+        row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name not in columns:
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
 def _validate_snapshot(snapshot: sqlite3.Row) -> list[str]:
@@ -171,17 +201,19 @@ def _save_error(
             raw_snapshot_id,
             record_index,
             source,
+            validator_version,
             licence_number,
             error_message,
             raw_record,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot["id"],
             record_index,
             snapshot["source"] or "unknown",
+            VALIDATOR_VERSION,
             licence_number,
             "; ".join(errors),
             json.dumps(raw_record, sort_keys=True, separators=(",", ":")),

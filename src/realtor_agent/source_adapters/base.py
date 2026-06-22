@@ -8,6 +8,7 @@ class RawSourcePage:
     """One raw response page from a data source."""
 
     source: str
+    adapter_version: str
     endpoint: str
     query_params: dict[str, Any]
     raw_json: dict[str, Any]
@@ -17,6 +18,7 @@ class SourceAdapter(Protocol):
     """Common shape for every data source adapter."""
 
     source: str
+    adapter_version: str
 
     def fetch_page(
         self,

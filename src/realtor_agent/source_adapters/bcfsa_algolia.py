@@ -20,6 +20,7 @@ class BCFSAAlgoliaAdapter:
     """Source adapter for BCFSA's Algolia-backed realtor search."""
 
     source = "BCFSA"
+    adapter_version = "bcfsa_algolia_v1"
 
     def __init__(self) -> None:
         settings = _load_settings()
@@ -49,6 +50,7 @@ class BCFSAAlgoliaAdapter:
         response.raise_for_status()
         return RawSourcePage(
             source=self.source,
+            adapter_version=self.adapter_version,
             endpoint=self.endpoint,
             query_params=payload,
             raw_json=response.json(),
@@ -86,6 +88,7 @@ class BCFSAAlgoliaAdapter:
 
         return {
             "source": self.source,
+            "adapterVersion": self.adapter_version,
             "hits": all_hits,
             "nbHits": first_json.get("nbHits"),
             "nbPages": first_json.get("nbPages"),

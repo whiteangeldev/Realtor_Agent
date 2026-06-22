@@ -21,6 +21,7 @@ class RawSnapshotStore:
                 CREATE TABLE IF NOT EXISTS raw_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     source TEXT NOT NULL,
+                    adapter_version TEXT NOT NULL,
                     endpoint TEXT NOT NULL,
                     query_params TEXT NOT NULL,
                     raw_json TEXT NOT NULL,
@@ -29,6 +30,12 @@ class RawSnapshotStore:
                     fetched_at TEXT NOT NULL
                 )
                 """
+            )
+            _add_column_if_missing(
+                connection,
+                table_name="raw_snapshots",
+                column_name="adapter_version",
+                column_sql="TEXT NOT NULL DEFAULT 'unknown'",
             )
 
     def save(self, page: RawSourcePage) -> int:
@@ -41,6 +48,7 @@ class RawSnapshotStore:
                 """
                 INSERT INTO raw_snapshots (
                     source,
+                    adapter_version,
                     endpoint,
                     query_params,
                     raw_json,
@@ -48,10 +56,11 @@ class RawSnapshotStore:
                     fetch_status,
                     fetched_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     page.source,
+                    page.adapter_version,
                     page.endpoint,
                     _to_json(page.query_params),
                     raw_json,
@@ -61,6 +70,20 @@ class RawSnapshotStore:
                 ),
             )
             return int(cursor.lastrowid)
+
+
+def _add_column_if_missing(
+    connection: sqlite3.Connection,
+    *,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    columns = {
+        row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name not in columns:
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
 def _to_json(value) -> str:

@@ -96,6 +96,7 @@ The `raw_snapshots` table stores:
 
 ```text
 source
+adapter_version
 endpoint
 query_params
 raw_json
@@ -129,6 +130,12 @@ Bad records are written to:
 normalization_errors
 ```
 
+Each validation error also stores:
+
+```text
+validator_version
+```
+
 Good records are only counted for now. They are not inserted into a realtor table yet.
 
 ## Required `.env` Settings
@@ -142,4 +149,5 @@ BCFSA_ALGOLIA_FILTERS=...
 
 ## Next Step
 
-Step 4 will normalize valid BCFSA records into a standard realtor format.
+Step 4 will normalize valid BCFSA records into a standard realtor format and store a
+`normalizer_version`.
