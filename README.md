@@ -21,7 +21,7 @@ Current code only does this:
 BCFSA Algolia API -> Source Adapter Layer -> raw JSON
 ```
 
-No database yet. No validation yet. No dashboard yet.
+Step 1 does not validate, normalize, or save realtor records.
 
 Current source adapter:
 
@@ -70,6 +70,39 @@ realtor-agent --all --hits-per-page 1000 --max-pages 2 --output data/bcfsa_first
 ```
 
 This still stores raw API data only. Step 2 will save this into `raw_snapshots`.
+
+## Step 2: Raw Snapshot Store
+
+Store raw BCFSA page responses in SQLite before validation or normalization:
+
+```bash
+realtor-agent --query smith --hits-per-page 2 --store-raw
+```
+
+Store multiple raw pages:
+
+```bash
+realtor-agent --all --hits-per-page 1000 --max-pages 2 --store-raw
+```
+
+This creates:
+
+```text
+data/realtor_agent.db
+  raw_snapshots
+```
+
+The `raw_snapshots` table stores:
+
+```text
+source
+endpoint
+query_params
+raw_json
+response_hash
+fetch_status
+fetched_at
+```
 
 ## Required `.env` Settings
 

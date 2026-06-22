@@ -4,6 +4,8 @@ from typing import Any
 
 import httpx
 
+from realtor_agent.source_adapters.base import RawSourcePage
+
 MAX_HITS_PER_PAGE = 1000
 ENV_FILE = Path(".env")
 REQUIRED_SETTINGS = (
@@ -17,7 +19,7 @@ REQUIRED_SETTINGS = (
 class BCFSAAlgoliaAdapter:
     """Source adapter for BCFSA's Algolia-backed realtor search."""
 
-    source_name = "BCFSA"
+    source = "BCFSA"
 
     def __init__(self) -> None:
         settings = _load_settings()
@@ -35,14 +37,8 @@ class BCFSAAlgoliaAdapter:
         query: str = "",
         page: int = 0,
         hits_per_page: int = 10,
-    ) -> dict[str, Any]:
-        hits_per_page = max(1, min(hits_per_page, MAX_HITS_PER_PAGE))
-        payload = {
-            "query": query,
-            "page": page,
-            "hitsPerPage": hits_per_page,
-            "filters": self.filters,
-        }
+    ) -> RawSourcePage:
+        payload = self._query_params(query=query, page=page, hits_per_page=hits_per_page)
 
         headers = {
             "X-Algolia-Application-Id": self.app_id,
@@ -51,7 +47,28 @@ class BCFSAAlgoliaAdapter:
 
         response = httpx.post(self.endpoint, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
-        return response.json()
+        return RawSourcePage(
+            source=self.source,
+            endpoint=self.endpoint,
+            query_params=payload,
+            raw_json=response.json(),
+        )
+
+    def fetch_pages(
+        self,
+        query: str = "",
+        hits_per_page: int = 1000,
+        max_pages: int | None = None,
+    ):
+        first_page = self.fetch_page(query=query, page=0, hits_per_page=hits_per_page)
+        yield first_page
+
+        total_pages = int(first_page.raw_json.get("nbPages", 0))
+        if max_pages is not None:
+            total_pages = min(total_pages, max_pages)
+
+        for page in range(1, total_pages):
+            yield self.fetch_page(query=query, page=page, hits_per_page=hits_per_page)
 
     def fetch_all(
         self,
@@ -59,28 +76,29 @@ class BCFSAAlgoliaAdapter:
         hits_per_page: int = 1000,
         max_pages: int | None = None,
     ) -> dict[str, Any]:
-        first_page = self.fetch_page(query=query, page=0, hits_per_page=hits_per_page)
-        all_hits = list(first_page.get("hits", []))
-        total_pages = int(first_page.get("nbPages", 0))
-
-        if max_pages is not None:
-            total_pages = min(total_pages, max_pages)
-
-        for page in range(1, total_pages):
-            page_response = self.fetch_page(
-                query=query,
-                page=page,
-                hits_per_page=hits_per_page,
-            )
-            all_hits.extend(page_response.get("hits", []))
+        pages = list(
+            self.fetch_pages(query=query, hits_per_page=hits_per_page, max_pages=max_pages)
+        )
+        first_json = pages[0].raw_json if pages else {}
+        all_hits = []
+        for page in pages:
+            all_hits.extend(page.raw_json.get("hits", []))
 
         return {
-            "source": self.source_name,
+            "source": self.source,
             "hits": all_hits,
-            "nbHits": first_page.get("nbHits"),
-            "nbPages": first_page.get("nbPages"),
-            "hitsPerPage": first_page.get("hitsPerPage"),
-            "fetchedPages": total_pages,
+            "nbHits": first_json.get("nbHits"),
+            "nbPages": first_json.get("nbPages"),
+            "hitsPerPage": first_json.get("hitsPerPage"),
+            "fetchedPages": len(pages),
+        }
+
+    def _query_params(self, query: str, page: int, hits_per_page: int) -> dict[str, Any]:
+        return {
+            "query": query,
+            "page": page,
+            "hitsPerPage": max(1, min(hits_per_page, MAX_HITS_PER_PAGE)),
+            "filters": self.filters,
         }
 
 
