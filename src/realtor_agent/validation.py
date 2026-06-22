@@ -3,7 +3,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 VALIDATOR_VERSION = "raw_validator_v1"
 
@@ -16,7 +16,12 @@ class ValidationSummary:
     invalid_records: int
 
 
-def validate_raw_snapshots(db_path: Path) -> ValidationSummary:
+def validate_raw_snapshots(
+    db_path: Path,
+    *,
+    raw_snapshot_ids: Iterable[int] | None = None,
+) -> ValidationSummary:
+    snapshot_ids = _snapshot_ids(raw_snapshot_ids)
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         _setup_errors_table(connection)
@@ -27,7 +32,14 @@ def validate_raw_snapshots(db_path: Path) -> ValidationSummary:
                 column_name="adapter_version",
                 column_sql="TEXT NOT NULL DEFAULT 'unknown'",
             )
-        connection.execute("DELETE FROM normalization_errors")
+        if snapshot_ids is None:
+            connection.execute("DELETE FROM normalization_errors")
+        elif snapshot_ids:
+            placeholders = _placeholders(snapshot_ids)
+            connection.execute(
+                f"DELETE FROM normalization_errors WHERE raw_snapshot_id IN ({placeholders})",
+                snapshot_ids,
+            )
 
         if not _table_exists(connection, "raw_snapshots"):
             return ValidationSummary(
@@ -37,12 +49,15 @@ def validate_raw_snapshots(db_path: Path) -> ValidationSummary:
                 invalid_records=0,
             )
 
+        where_clause, values = _snapshot_filter(snapshot_ids)
         snapshots = connection.execute(
-            """
+            f"""
             SELECT id, source, fetched_at, raw_json
             FROM raw_snapshots
+            {where_clause}
             ORDER BY id
-            """
+            """,
+            values,
         ).fetchall()
 
         records_checked = 0
@@ -135,6 +150,24 @@ def _add_column_if_missing(
     }
     if column_name not in columns:
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+
+def _snapshot_ids(raw_snapshot_ids: Iterable[int] | None) -> tuple[int, ...] | None:
+    if raw_snapshot_ids is None:
+        return None
+    return tuple(int(snapshot_id) for snapshot_id in raw_snapshot_ids)
+
+
+def _snapshot_filter(snapshot_ids: tuple[int, ...] | None) -> tuple[str, tuple[int, ...]]:
+    if snapshot_ids is None:
+        return "", ()
+    if not snapshot_ids:
+        return "WHERE 1 = 0", ()
+    return f"WHERE id IN ({_placeholders(snapshot_ids)})", snapshot_ids
+
+
+def _placeholders(values: tuple[int, ...]) -> str:
+    return ",".join("?" for _ in values)
 
 
 def _validate_snapshot(snapshot: sqlite3.Row) -> list[str]:

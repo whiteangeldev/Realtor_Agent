@@ -256,7 +256,76 @@ license_level
 license_category
 ```
 
-## Step 7: Dashboard
+## Step 7: Scheduled Sync Trigger
+
+Run the full pipeline once:
+
+```bash
+realtor-agent --sync-now
+```
+
+Run the full pipeline now, then automatically repeat every 3 hours:
+
+```bash
+realtor-agent --scheduled-sync
+```
+
+The scheduled sync runs:
+
+```text
+BCFSA API
+  -> Raw Snapshot Store
+  -> Validation
+  -> Normalization
+  -> Realtors Table
+  -> Change Detection
+```
+
+Each sync run is logged in:
+
+```text
+source_runs
+```
+
+The run log stores:
+
+```text
+trigger
+status
+started_at
+finished_at
+raw snapshots stored
+valid / invalid records
+normalized records
+saved realtors
+change events created
+```
+
+Optional settings:
+
+```bash
+realtor-agent --scheduled-sync --sync-interval-hours 3
+realtor-agent --sync-now --max-pages 1
+```
+
+After changing sync code on a server, restart the scheduled sync process so the
+running process uses the latest code.
+
+If the dashboard count is higher than the latest source count, run a full sync:
+
+```bash
+realtor-agent --sync-now
+```
+
+A full sync normalizes only the raw pages from that sync and removes realtor rows
+that no longer exist in the latest BCFSA result set. Removed rows are recorded in
+`change_events` as:
+
+```text
+removed_realtor
+```
+
+## Step 8: Dashboard
 
 Start the local dashboard:
 
@@ -281,7 +350,12 @@ view profile
 view change history
 view sync logs
 export CSV
+auto-refresh every 60 seconds
 ```
+
+The dashboard reads the SQLite database live. When scheduled sync creates new
+`change_events` or `source_runs`, the browser updates automatically without
+restarting the dashboard server.
 
 Dashboard search modes:
 

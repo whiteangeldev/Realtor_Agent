@@ -8,11 +8,16 @@ from pathlib import Path
 class RealtorSaveSummary:
     normalized_rows_checked: int
     realtor_rows_saved: int
+    removed_realtors: int
     total_realtors: int
     change_events_created: int
 
 
-def save_realtors_from_normalized(db_path: Path) -> RealtorSaveSummary:
+def save_realtors_from_normalized(
+    db_path: Path,
+    *,
+    detect_removals: bool = True,
+) -> RealtorSaveSummary:
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         _setup_realtors_table(connection)
@@ -43,10 +48,16 @@ def save_realtors_from_normalized(db_path: Path) -> RealtorSaveSummary:
             _upsert_realtor(connection, row)
             saved += 1
 
+        removed = 0
+        if detect_removals and latest_normalized_rows:
+            removed = _detect_and_remove_missing_realtors(connection, latest_normalized_rows)
+            change_events_created += removed
+
         total_realtors = connection.execute("SELECT COUNT(*) FROM realtors").fetchone()[0]
         return RealtorSaveSummary(
             normalized_rows_checked=len(latest_normalized_rows),
             realtor_rows_saved=saved,
+            removed_realtors=removed,
             total_realtors=total_realtors,
             change_events_created=change_events_created,
         )
@@ -134,6 +145,32 @@ def _detect_and_save_changes(connection: sqlite3.Connection, row: sqlite3.Row) -
     return changes
 
 
+def _detect_and_remove_missing_realtors(
+    connection: sqlite3.Connection,
+    latest_normalized_rows: list[sqlite3.Row],
+) -> int:
+    current_license_numbers = {row["license_number"] for row in latest_normalized_rows}
+    placeholders = ",".join("?" for _ in current_license_numbers)
+    missing_realtors = connection.execute(
+        f"""
+        SELECT *
+        FROM realtors
+        WHERE license_number NOT IN ({placeholders})
+        """,
+        tuple(current_license_numbers),
+    ).fetchall()
+
+    removed = 0
+    for realtor in missing_realtors:
+        _save_removed_realtor_event(connection, realtor)
+        connection.execute(
+            "DELETE FROM realtors WHERE license_number = ?",
+            (realtor["license_number"],),
+        )
+        removed += 1
+    return removed
+
+
 _TRACKED_FIELDS = (
     "name",
     "brokerage",
@@ -185,6 +222,34 @@ def _save_change_event(
             new_value,
             row["source"],
             row["normalizer_version"],
+            datetime.now(UTC).isoformat(),
+        ),
+    )
+
+
+def _save_removed_realtor_event(connection: sqlite3.Connection, realtor: sqlite3.Row) -> None:
+    connection.execute(
+        """
+        INSERT INTO change_events (
+            license_number,
+            event_type,
+            field_name,
+            old_value,
+            new_value,
+            source,
+            normalizer_version,
+            detected_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            realtor["license_number"],
+            "removed_realtor",
+            None,
+            realtor["name"],
+            None,
+            realtor["source"],
+            realtor["normalizer_version"],
             datetime.now(UTC).isoformat(),
         ),
     )

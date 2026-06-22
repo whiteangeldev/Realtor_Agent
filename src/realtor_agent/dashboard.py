@@ -118,6 +118,32 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = ?
+        """,
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _add_column_if_missing(
+    connection: sqlite3.Connection,
+    *,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    columns = {
+        row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name not in columns:
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+
 def _get_summary(db_path: Path) -> dict:
     with _connect(db_path) as connection:
         realtor_count = connection.execute("SELECT COUNT(*) FROM realtors").fetchone()[0]
@@ -326,26 +352,40 @@ def _get_sync_logs(db_path: Path, params: dict[str, list[str]]) -> dict:
     limit = _limit(params, default=20, maximum=100)
 
     with _connect(db_path) as connection:
+        if not _table_exists(connection, "source_runs"):
+            return {"rows": []}
+        _add_column_if_missing(
+            connection,
+            table_name="source_runs",
+            column_name="removed_realtors",
+            column_sql="INTEGER NOT NULL DEFAULT 0",
+        )
+
         rows = connection.execute(
             """
             SELECT
                 id,
                 source,
-                adapter_version,
-                endpoint,
-                query_params,
-                raw_json,
-                response_hash,
-                fetch_status,
-                fetched_at
-            FROM raw_snapshots
-            ORDER BY fetched_at DESC, id DESC
+                trigger,
+                status,
+                started_at,
+                finished_at,
+                raw_snapshots_stored,
+                valid_records,
+                invalid_records,
+                normalized_records,
+                realtor_rows_saved,
+                change_events_created,
+                removed_realtors,
+                error_message
+            FROM source_runs
+            ORDER BY started_at DESC, id DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
 
-    return {"rows": [_sync_log_row(row) for row in rows]}
+    return {"rows": [_row_to_dict(row) for row in rows]}
 
 
 def _export_realtors_csv(db_path: Path, params: dict[str, list[str]]) -> str:
@@ -464,35 +504,6 @@ def _brokerage_where(search: str) -> tuple[str, list[str]]:
     return f"{base} AND brokerage LIKE ?", [f"%{search}%"]
 
 
-def _sync_log_row(row: sqlite3.Row) -> dict:
-    raw_json = _load_json(row["raw_json"])
-    query_params = _load_json(row["query_params"])
-    if not isinstance(query_params, dict):
-        query_params = {}
-    hits = raw_json.get("hits") if isinstance(raw_json, dict) else None
-
-    return {
-        "id": row["id"],
-        "source": row["source"],
-        "adapter_version": row["adapter_version"],
-        "fetch_status": row["fetch_status"],
-        "fetched_at": row["fetched_at"],
-        "endpoint": row["endpoint"],
-        "page": query_params.get("page"),
-        "hits_per_page": query_params.get("hitsPerPage"),
-        "hit_count": len(hits) if isinstance(hits, list) else None,
-        "response_hash": row["response_hash"],
-    }
-
-
-def _load_json(value: str) -> dict | list:
-    try:
-        parsed = json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return {}
-    return parsed if isinstance(parsed, (dict, list)) else {}
-
-
 def _param(params: dict[str, list[str]], name: str, default: str = "") -> str:
     return params.get(name, [default])[0].strip()
 
@@ -547,6 +558,8 @@ HTML = """<!doctype html>
       <p id="lastUpdated">Loading database status...</p>
     </div>
     <div class="top-actions">
+      <button type="button" class="ghost-button" id="refreshButton">Refresh</button>
+      <span class="refresh-status" id="refreshStatus">Auto-refresh on</span>
       <a class="export-button" id="exportLink" href="/export/realtors.csv">Export Realtors CSV</a>
     </div>
   </header>
@@ -668,12 +681,13 @@ HTML = """<!doctype html>
           <table>
             <thead>
               <tr>
-                <th>Fetched</th>
-                <th>Source</th>
-                <th>Adapter</th>
-                <th>Page</th>
-                <th>Hits</th>
+                <th>Started</th>
+                <th>Trigger</th>
                 <th>Status</th>
+                <th>Pages</th>
+                <th>Valid / Invalid</th>
+                <th>Removed</th>
+                <th>Changes</th>
               </tr>
             </thead>
             <tbody id="syncRows"></tbody>
@@ -746,6 +760,13 @@ body {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.refresh-status {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 h1,
@@ -850,6 +871,7 @@ main {
 input,
 select,
 button,
+.ghost-button,
 .export-button {
   min-height: 38px;
   border-radius: 6px;
@@ -896,10 +918,24 @@ button,
   white-space: nowrap;
 }
 
+.ghost-button {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0 12px;
+  font-weight: 720;
+  cursor: pointer;
+}
+
 button:hover,
 .export-button:hover {
   background: var(--accent-dark);
   border-color: var(--accent-dark);
+}
+
+.ghost-button:hover {
+  background: var(--surface-alt);
+  border-color: var(--line-strong);
 }
 
 button:disabled {
@@ -1173,7 +1209,8 @@ tbody tr.selected {
   }
 
   .top-actions,
-  .export-button {
+  .export-button,
+  .ghost-button {
     width: 100%;
   }
 
@@ -1212,6 +1249,8 @@ tbody tr.selected {
 
 
 JS = """
+const AUTO_REFRESH_MS = 60000;
+
 const TABLE_HEADERS = {
   realtor: ["Name", "Licence", "Brokerage", "Status", "City"],
   brokerage: ["Brokerage", "Realtors", "Cities", "Last Updated"],
@@ -1240,6 +1279,7 @@ const state = {
   totalPages: 1,
   selectedLicense: null,
   selectedBrokerage: null,
+  isRefreshing: false,
 };
 
 const nodes = {
@@ -1258,6 +1298,8 @@ const nodes = {
   changeRows: document.getElementById("changeRows"),
   syncRows: document.getElementById("syncRows"),
   exportLink: document.getElementById("exportLink"),
+  refreshButton: document.getElementById("refreshButton"),
+  refreshStatus: document.getElementById("refreshStatus"),
   lastUpdated: document.getElementById("lastUpdated"),
   metricRealtors: document.getElementById("metricRealtors"),
   metricBrokerages: document.getElementById("metricBrokerages"),
@@ -1296,6 +1338,7 @@ nodes.perPageSelect.addEventListener("change", () => {
 
 nodes.prevPage.addEventListener("click", () => setPage(state.page - 1));
 nodes.nextPage.addEventListener("click", () => setPage(state.page + 1));
+nodes.refreshButton.addEventListener("click", () => refreshDashboard({ silent: false }));
 
 function currentMode() {
   const checkedMode = document.querySelector('input[name="mode"]:checked');
@@ -1344,6 +1387,10 @@ function updateExportLink() {
   }
   nodes.exportLink.href = `/export/realtors.csv?${params.toString()}`;
   nodes.exportLink.textContent = "Export Realtors CSV";
+}
+
+function setRefreshStatus(message) {
+  nodes.refreshStatus.textContent = message;
 }
 
 function setPage(nextPage) {
@@ -1424,16 +1471,18 @@ function loadSummary() {
   });
 }
 
-function loadResults() {
+function loadResults(options = {}) {
   renderHeaders();
   if (state.mode === "brokerage") {
-    return loadBrokerages();
+    return loadBrokerages(options);
   }
-  return loadRealtors();
+  return loadRealtors(options);
 }
 
-function loadRealtors() {
-  emptyRow(nodes.resultRows, "Loading...", columnCount());
+function loadRealtors(options = {}) {
+  if (!options.silent) {
+    emptyRow(nodes.resultRows, "Loading...", columnCount());
+  }
   return api("/api/realtors", {
     search: state.search,
     mode: state.mode,
@@ -1461,14 +1510,18 @@ function loadRealtors() {
       nodes.resultRows.appendChild(row);
     });
 
-    if (!state.selectedLicense) {
+    if (state.selectedLicense) {
+      highlightSelection();
+    } else {
       selectRealtor(payload.rows[0].license_number);
     }
   });
 }
 
-function loadBrokerages() {
-  emptyRow(nodes.resultRows, "Loading...", columnCount());
+function loadBrokerages(options = {}) {
+  if (!options.silent) {
+    emptyRow(nodes.resultRows, "Loading...", columnCount());
+  }
   return api("/api/brokerages", {
     search: state.search,
     page: state.page,
@@ -1494,9 +1547,21 @@ function loadBrokerages() {
       nodes.resultRows.appendChild(row);
     });
 
-    if (!state.selectedBrokerage) {
+    if (state.selectedBrokerage) {
+      highlightSelection();
+    } else {
       selectBrokerage(payload.rows[0].brokerage);
     }
+  });
+}
+
+function highlightSelection() {
+  document.querySelectorAll("#resultRows tr").forEach((row) => {
+    row.classList.toggle(
+      "selected",
+      row.dataset.license === state.selectedLicense ||
+        row.dataset.brokerage === state.selectedBrokerage
+    );
   });
 }
 
@@ -1522,17 +1587,21 @@ function selectBrokerage(brokerage) {
   loadChanges({ brokerage });
 }
 
-function loadProfile(licenseNumber) {
-  nodes.profileBody.className = "empty-state";
-  nodes.profileBody.textContent = "Loading...";
+function loadProfile(licenseNumber, options = {}) {
+  if (!options.silent) {
+    nodes.profileBody.className = "empty-state";
+    nodes.profileBody.textContent = "Loading...";
+  }
   return api("/api/realtor", { license_number: licenseNumber }).then((payload) => {
     renderProfile(payload.realtor);
   });
 }
 
-function loadBrokerageProfile(brokerage) {
-  nodes.profileBody.className = "empty-state";
-  nodes.profileBody.textContent = "Loading...";
+function loadBrokerageProfile(brokerage, options = {}) {
+  if (!options.silent) {
+    nodes.profileBody.className = "empty-state";
+    nodes.profileBody.textContent = "Loading...";
+  }
   return api("/api/brokerage", { brokerage }).then((payload) => {
     renderBrokerageProfile(payload);
   });
@@ -1639,8 +1708,10 @@ function renderBrokerageProfile(payload) {
   nodes.profileBody.append(title, fields, list);
 }
 
-function loadChanges(filters = {}) {
-  emptyRow(nodes.changeRows, "Loading...", 6);
+function loadChanges(filters = {}, options = {}) {
+  if (!options.silent) {
+    emptyRow(nodes.changeRows, "Loading...", 6);
+  }
   return api("/api/changes", { limit: 50, ...filters }).then((payload) => {
     nodes.changeRows.replaceChildren();
     if (!payload.rows.length) {
@@ -1660,34 +1731,81 @@ function loadChanges(filters = {}) {
   });
 }
 
-function loadSyncLogs() {
-  emptyRow(nodes.syncRows, "Loading...", 6);
+function loadSyncLogs(options = {}) {
+  const columns = 7;
+  if (!options.silent) {
+    emptyRow(nodes.syncRows, "Loading...", columns);
+  }
   return api("/api/sync-logs", { limit: 20 }).then((payload) => {
     nodes.syncRows.replaceChildren();
     if (!payload.rows.length) {
-      emptyRow(nodes.syncRows, "No sync logs", 6);
+      emptyRow(nodes.syncRows, "No sync logs", columns);
       return;
     }
     payload.rows.forEach((log) => {
       const row = document.createElement("tr");
-      setCell(row, formatDate(log.fetched_at));
-      setCell(row, log.source);
-      setCell(row, log.adapter_version);
-      setCell(row, log.page);
-      setCell(row, log.hit_count);
-      setCell(row, log.fetch_status);
+      setCell(row, formatDate(log.started_at));
+      setCell(row, log.trigger);
+      setCell(row, log.status);
+      setCell(row, log.raw_snapshots_stored);
+      setCell(row, `${log.valid_records.toLocaleString()} / ${log.invalid_records.toLocaleString()}`);
+      setCell(row, log.removed_realtors);
+      setCell(row, log.change_events_created);
       nodes.syncRows.appendChild(row);
     });
   });
 }
 
+function refreshCurrentDetail(options = {}) {
+  if (state.selectedLicense) {
+    return Promise.all([
+      loadProfile(state.selectedLicense, options),
+      loadChanges({ license_number: state.selectedLicense }, options),
+    ]);
+  }
+  if (state.selectedBrokerage) {
+    return Promise.all([
+      loadBrokerageProfile(state.selectedBrokerage, options),
+      loadChanges({ brokerage: state.selectedBrokerage }, options),
+    ]);
+  }
+  return loadChanges({}, options);
+}
+
+function refreshDashboard(options = {}) {
+  if (state.isRefreshing) {
+    return Promise.resolve();
+  }
+
+  state.isRefreshing = true;
+  setRefreshStatus("Refreshing...");
+  return Promise.all([
+    loadSummary(),
+    loadResults(options),
+    loadSyncLogs(options),
+  ])
+    .then(() => refreshCurrentDetail(options))
+    .then(() => {
+      setRefreshStatus(`Updated ${new Date().toLocaleTimeString()}`);
+    })
+    .catch((error) => {
+      setRefreshStatus("Refresh failed");
+      nodes.lastUpdated.textContent = error.message;
+      nodes.lastUpdated.className = "danger";
+    })
+    .finally(() => {
+      state.isRefreshing = false;
+    });
+}
+
 function boot() {
   updateModeUI();
   updateExportLink();
-  Promise.all([loadSummary(), loadResults(), loadSyncLogs()]).catch((error) => {
+  refreshDashboard({ silent: false }).catch((error) => {
     nodes.lastUpdated.textContent = error.message;
     nodes.lastUpdated.className = "danger";
   });
+  window.setInterval(() => refreshDashboard({ silent: true }), AUTO_REFRESH_MS);
 }
 
 boot();

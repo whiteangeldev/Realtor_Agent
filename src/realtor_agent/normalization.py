@@ -3,7 +3,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from realtor_agent.validation import validate_raw_snapshots
 
@@ -17,21 +17,31 @@ class NormalizationSummary:
     skipped_records: int
 
 
-def normalize_raw_snapshots(db_path: Path) -> NormalizationSummary:
-    validate_raw_snapshots(db_path)
+def normalize_raw_snapshots(
+    db_path: Path,
+    *,
+    validate_first: bool = True,
+    raw_snapshot_ids: Iterable[int] | None = None,
+) -> NormalizationSummary:
+    snapshot_ids = _snapshot_ids(raw_snapshot_ids)
+    if validate_first:
+        validate_raw_snapshots(db_path, raw_snapshot_ids=snapshot_ids)
 
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         _setup_normalized_table(connection)
         connection.execute("DELETE FROM normalized_realtors")
 
-        invalid_records = _load_invalid_record_keys(connection)
+        invalid_records = _load_invalid_record_keys(connection, snapshot_ids)
+        where_clause, values = _snapshot_filter(snapshot_ids)
         snapshots = connection.execute(
-            """
+            f"""
             SELECT id, source, fetched_at, raw_json
             FROM raw_snapshots
+            {where_clause}
             ORDER BY id
-            """
+            """,
+            values,
         ).fetchall()
 
         records_checked = 0
@@ -101,13 +111,45 @@ def _setup_normalized_table(connection: sqlite3.Connection) -> None:
     )
 
 
-def _load_invalid_record_keys(connection: sqlite3.Connection) -> set[tuple[int, int]]:
+def _snapshot_ids(raw_snapshot_ids: Iterable[int] | None) -> tuple[int, ...] | None:
+    if raw_snapshot_ids is None:
+        return None
+    return tuple(int(snapshot_id) for snapshot_id in raw_snapshot_ids)
+
+
+def _snapshot_filter(snapshot_ids: tuple[int, ...] | None) -> tuple[str, tuple[int, ...]]:
+    if snapshot_ids is None:
+        return "", ()
+    if not snapshot_ids:
+        return "WHERE 1 = 0", ()
+    return f"WHERE id IN ({_placeholders(snapshot_ids)})", snapshot_ids
+
+
+def _error_snapshot_filter(snapshot_ids: tuple[int, ...] | None) -> tuple[str, tuple[int, ...]]:
+    if snapshot_ids is None:
+        return "", ()
+    if not snapshot_ids:
+        return "AND 1 = 0", ()
+    return f"AND raw_snapshot_id IN ({_placeholders(snapshot_ids)})", snapshot_ids
+
+
+def _placeholders(values: tuple[int, ...]) -> str:
+    return ",".join("?" for _ in values)
+
+
+def _load_invalid_record_keys(
+    connection: sqlite3.Connection,
+    snapshot_ids: tuple[int, ...] | None,
+) -> set[tuple[int, int]]:
+    where_clause, values = _error_snapshot_filter(snapshot_ids)
     rows = connection.execute(
-        """
+        f"""
         SELECT raw_snapshot_id, record_index
         FROM normalization_errors
         WHERE record_index IS NOT NULL
-        """
+        {where_clause}
+        """,
+        values,
     ).fetchall()
     return {(row["raw_snapshot_id"], row["record_index"]) for row in rows}
 

@@ -7,9 +7,11 @@ from realtor_agent.normalization import normalize_raw_snapshots
 from realtor_agent.raw_snapshot_store import RawSnapshotStore
 from realtor_agent.realtor_store import save_realtors_from_normalized
 from realtor_agent.source_adapters import BCFSAAlgoliaAdapter
+from realtor_agent.sync import DEFAULT_SYNC_INTERVAL_HOURS, run_scheduled_sync, run_sync_once
 from realtor_agent.validation import validate_raw_snapshots
 
 DEFAULT_DB_PATH = Path("data/realtor_agent.db")
+DEFAULT_SYNC_HITS_PER_PAGE = 1000
 
 
 def main() -> None:
@@ -24,6 +26,20 @@ def main() -> None:
     parser.add_argument("--validate-raw", action="store_true", help="Validate stored raw snapshots.")
     parser.add_argument("--normalize", action="store_true", help="Normalize valid raw snapshots.")
     parser.add_argument("--save-realtors", action="store_true", help="Save normalized rows to realtors.")
+    parser.add_argument("--sync-now", action="store_true", help="Run the full sync pipeline once.")
+    parser.add_argument("--scheduled-sync", action="store_true", help="Run full sync now, then repeat.")
+    parser.add_argument(
+        "--sync-interval-hours",
+        type=float,
+        default=DEFAULT_SYNC_INTERVAL_HOURS,
+        help="Hours between scheduled sync runs.",
+    )
+    parser.add_argument(
+        "--sync-hits-per-page",
+        type=int,
+        default=DEFAULT_SYNC_HITS_PER_PAGE,
+        help="Records per BCFSA API page during full sync.",
+    )
     parser.add_argument("--dashboard", action="store_true", help="Start the local dashboard.")
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH, help="SQLite database path.")
     parser.add_argument("--host", default="127.0.0.1", help="Dashboard host.")
@@ -34,12 +50,44 @@ def main() -> None:
         run_dashboard(args.db_path, host=args.host, port=args.port)
         return
 
+    if args.scheduled_sync:
+        run_scheduled_sync(
+            db_path=args.db_path,
+            interval_hours=args.sync_interval_hours,
+            query=args.query,
+            hits_per_page=args.sync_hits_per_page,
+            max_pages=args.max_pages,
+        )
+        return
+
+    if args.sync_now:
+        summary = run_sync_once(
+            db_path=args.db_path,
+            query=args.query,
+            hits_per_page=args.sync_hits_per_page,
+            max_pages=args.max_pages,
+            trigger="manual",
+        )
+        print(
+            "Sync complete. "
+            f"Run ID: {summary.run_id}. "
+            f"Raw snapshots: {summary.raw_snapshots_stored}. "
+            f"Valid records: {summary.validation.valid_records}. "
+            f"Invalid records: {summary.validation.invalid_records}. "
+            f"Normalized: {summary.normalization.normalized_records}. "
+            f"Realtors saved: {summary.realtor_save.realtor_rows_saved}. "
+            f"Removed: {summary.realtor_save.removed_realtors}. "
+            f"Change events: {summary.realtor_save.change_events_created}."
+        )
+        return
+
     if args.save_realtors:
         summary = save_realtors_from_normalized(args.db_path)
         print(
             "Saved realtor records from normalized rows. "
             f"Checked: {summary.normalized_rows_checked}. "
             f"Saved/updated: {summary.realtor_rows_saved}. "
+            f"Removed: {summary.removed_realtors}. "
             f"Total realtors: {summary.total_realtors}. "
             f"Change events: {summary.change_events_created}."
         )

@@ -37,8 +37,14 @@ class RawSnapshotStore:
                 column_name="adapter_version",
                 column_sql="TEXT NOT NULL DEFAULT 'unknown'",
             )
+            _add_column_if_missing(
+                connection,
+                table_name="raw_snapshots",
+                column_name="source_run_id",
+                column_sql="INTEGER",
+            )
 
-    def save(self, page: RawSourcePage) -> int:
+    def save(self, page: RawSourcePage, *, source_run_id: int | None = None) -> int:
         self.setup()
         raw_json = _to_json(page.raw_json)
         fetched_at = datetime.now(UTC).isoformat()
@@ -47,6 +53,7 @@ class RawSnapshotStore:
             cursor = connection.execute(
                 """
                 INSERT INTO raw_snapshots (
+                    source_run_id,
                     source,
                     adapter_version,
                     endpoint,
@@ -56,9 +63,10 @@ class RawSnapshotStore:
                     fetch_status,
                     fetched_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    source_run_id,
                     page.source,
                     page.adapter_version,
                     page.endpoint,
