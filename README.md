@@ -366,7 +366,7 @@ filter by licence category
 rows per page
 previous/next pagination
 view profile
-view change history
+view human-readable change feed
 view sync logs
 export CSV
 auto-refresh every 60 seconds
@@ -375,6 +375,14 @@ auto-refresh every 60 seconds
 The dashboard reads the SQLite database live. When scheduled sync creates new
 `change_events` or `source_runs`, the browser updates automatically without
 restarting the dashboard server.
+
+The raw audit data still stays in `change_events`. The dashboard adds readable
+messages such as:
+
+```text
+John Smith changed brokerage from ABC Realty to Elite Realty.
+Jane Lee was not found in the latest full BCFSA sync.
+```
 
 Dashboard search modes:
 
@@ -402,6 +410,23 @@ Optional settings:
 
 ```bash
 realtor-agent --dashboard --host 127.0.0.1 --port 8765
+```
+
+## Automated Tests
+
+Run the basic regression tests:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+Current tests cover:
+
+```text
+saving normalized realtors
+brokerage rollups
+soft removal / not-found records
+human-readable change descriptions
 ```
 
 ## Required `.env` Settings

@@ -342,7 +342,7 @@ def _get_realtor(db_path: Path, params: dict[str, list[str]]) -> dict:
 
     return {
         "realtor": _row_to_dict(realtor) if realtor else None,
-        "changes": [_row_to_dict(row) for row in changes],
+        "changes": [_change_row_to_dict(row) for row in changes],
     }
 
 
@@ -424,10 +424,25 @@ def _get_brokerage(db_path: Path, params: dict[str, list[str]]) -> dict:
             """,
             (brokerage,),
         ).fetchall()
+        changes = connection.execute(
+            """
+            SELECT
+                change_events.*,
+                realtors.name AS realtor_name,
+                realtors.brokerage AS current_brokerage
+            FROM change_events
+            JOIN realtors ON realtors.license_number = change_events.license_number
+            WHERE realtors.brokerage = ?
+            ORDER BY change_events.detected_at DESC, change_events.id DESC
+            LIMIT 10
+            """,
+            (brokerage,),
+        ).fetchall()
 
     return {
         "brokerage": _row_to_dict(summary) if summary else None,
         "realtors": [_row_to_dict(row) for row in realtors],
+        "changes": [_change_row_to_dict(row) for row in changes],
     }
 
 
@@ -443,7 +458,10 @@ def _get_changes(db_path: Path, params: dict[str, list[str]]) -> dict:
         elif brokerage:
             rows = connection.execute(
                 """
-                SELECT change_events.*
+                SELECT
+                    change_events.*,
+                    realtors.name AS realtor_name,
+                    realtors.brokerage AS current_brokerage
                 FROM change_events
                 JOIN realtors ON realtors.license_number = change_events.license_number
                 WHERE realtors.brokerage = ?
@@ -455,15 +473,19 @@ def _get_changes(db_path: Path, params: dict[str, list[str]]) -> dict:
         else:
             rows = connection.execute(
                 """
-                SELECT *
+                SELECT
+                    change_events.*,
+                    realtors.name AS realtor_name,
+                    realtors.brokerage AS current_brokerage
                 FROM change_events
+                LEFT JOIN realtors ON realtors.license_number = change_events.license_number
                 ORDER BY detected_at DESC, id DESC
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
 
-    return {"rows": [_row_to_dict(row) for row in rows]}
+    return {"rows": [_change_row_to_dict(row) for row in rows]}
 
 
 def _get_sync_logs(db_path: Path, params: dict[str, list[str]]) -> dict:
@@ -615,14 +637,78 @@ def _changes_for_license(
 ) -> list[sqlite3.Row]:
     return connection.execute(
         """
-        SELECT *
+        SELECT
+            change_events.*,
+            realtors.name AS realtor_name,
+            realtors.brokerage AS current_brokerage
         FROM change_events
-        WHERE license_number = ?
+        LEFT JOIN realtors ON realtors.license_number = change_events.license_number
+        WHERE change_events.license_number = ?
         ORDER BY detected_at DESC, id DESC
         LIMIT ?
         """,
         (license_number, limit),
     ).fetchall()
+
+
+def _change_row_to_dict(row: sqlite3.Row) -> dict:
+    change = _row_to_dict(row)
+    change["event_label"] = _change_event_label(change["event_type"])
+    change["description"] = _change_description(change)
+    return change
+
+
+def _change_event_label(event_type: str) -> str:
+    return {
+        "new_realtor": "New realtor",
+        "removed_realtor": "Not found",
+        "reappeared_realtor": "Found again",
+        "brokerage_changed": "Brokerage changed",
+        "status_changed": "Status changed",
+        "location_changed": "Location changed",
+        "profile_changed": "Profile changed",
+    }.get(event_type, event_type.replace("_", " ").title())
+
+
+def _change_description(change: dict) -> str:
+    name = change.get("realtor_name") or change.get("old_value") or change["license_number"]
+    field_name = _field_label(change.get("field_name"))
+    old_value = _display_value(change.get("old_value"))
+    new_value = _display_value(change.get("new_value"))
+
+    if change["event_type"] == "new_realtor":
+        return f"{name} was added to the directory."
+    if change["event_type"] == "removed_realtor":
+        return f"{name} was not found in the latest full BCFSA sync."
+    if change["event_type"] == "reappeared_realtor":
+        return f"{name} appeared again in the latest BCFSA sync."
+    if change["event_type"] == "brokerage_changed":
+        return f"{name} changed brokerage from {old_value} to {new_value}."
+    if change["event_type"] == "status_changed":
+        return f"{name} changed licence status from {old_value} to {new_value}."
+    if change["event_type"] == "location_changed":
+        return f"{name} changed {field_name} from {old_value} to {new_value}."
+    if change["event_type"] == "profile_changed":
+        return f"{name} changed {field_name} from {old_value} to {new_value}."
+    return f"{name}: {_change_event_label(change['event_type'])}."
+
+
+def _field_label(field_name: str | None) -> str:
+    return {
+        "name": "name",
+        "brokerage": "brokerage",
+        "status": "licence status",
+        "city": "city",
+        "address": "address",
+        "license_level": "licence level",
+        "license_category": "licence category",
+    }.get(field_name or "profile", "profile")
+
+
+def _display_value(value: str | None) -> str:
+    if value is None or value == "":
+        return "empty"
+    return str(value)
 
 
 def _realtor_where(params: dict[str, list[str]]) -> tuple[str, list[str]]:
@@ -868,11 +954,9 @@ HTML = """<!doctype html>
           <table>
             <thead>
               <tr>
+                <th>Change</th>
                 <th>Licence</th>
-                <th>Event</th>
-                <th>Field</th>
-                <th>Old</th>
-                <th>New</th>
+                <th>Details</th>
                 <th>Detected</th>
               </tr>
             </thead>
@@ -1892,7 +1976,6 @@ function selectRealtor(licenseNumber) {
     row.classList.toggle("selected", row.dataset.license === licenseNumber);
   });
   loadProfile(licenseNumber);
-  loadChanges({ license_number: licenseNumber });
 }
 
 function selectBrokerage(brokerage) {
@@ -1903,7 +1986,6 @@ function selectBrokerage(brokerage) {
     row.classList.toggle("selected", row.dataset.brokerage === brokerage);
   });
   loadBrokerageProfile(brokerage);
-  loadChanges({ brokerage });
 }
 
 function loadProfile(licenseNumber, options = {}) {
@@ -1912,7 +1994,7 @@ function loadProfile(licenseNumber, options = {}) {
     nodes.profileBody.textContent = "Loading...";
   }
   return api("/api/realtor", { license_number: licenseNumber }).then((payload) => {
-    renderProfile(payload.realtor);
+    renderProfile(payload.realtor, payload.changes || []);
   });
 }
 
@@ -1926,7 +2008,7 @@ function loadBrokerageProfile(brokerage, options = {}) {
   });
 }
 
-function renderProfile(realtor) {
+function renderProfile(realtor, changes = []) {
   if (!realtor) {
     nodes.profileBody.className = "empty-state";
     nodes.profileBody.textContent = "Profile not found";
@@ -1970,7 +2052,7 @@ function renderProfile(realtor) {
     fields.appendChild(field);
   });
 
-  nodes.profileBody.append(title, fields);
+  nodes.profileBody.append(title, fields, miniChangeList(changes));
 }
 
 function renderBrokerageProfile(payload) {
@@ -2030,26 +2112,56 @@ function renderBrokerageProfile(payload) {
     list.appendChild(row);
   });
 
-  nodes.profileBody.append(title, fields, list);
+  nodes.profileBody.append(title, fields, list, miniChangeList(payload.changes || []));
+}
+
+function miniChangeList(changes) {
+  const list = document.createElement("div");
+  list.className = "mini-list";
+  const listTitle = document.createElement("h3");
+  listTitle.textContent = "Recent changes";
+  list.appendChild(listTitle);
+
+  if (!changes.length) {
+    const empty = document.createElement("div");
+    empty.className = "mini-row";
+    const textNode = document.createElement("span");
+    textNode.textContent = "No changes recorded";
+    empty.appendChild(textNode);
+    list.appendChild(empty);
+    return list;
+  }
+
+  changes.slice(0, 5).forEach((change) => {
+    const row = document.createElement("div");
+    row.className = "mini-row";
+    const label = document.createElement("strong");
+    label.textContent = change.event_label;
+    const description = document.createElement("span");
+    description.textContent = change.description;
+    row.append(label, description);
+    list.appendChild(row);
+  });
+
+  return list;
 }
 
 function loadChanges(filters = {}, options = {}) {
+  const columns = 4;
   if (!options.silent) {
-    emptyRow(nodes.changeRows, "Loading...", 6);
+    emptyRow(nodes.changeRows, "Loading...", columns);
   }
   return api("/api/changes", { limit: 50, ...filters }).then((payload) => {
     nodes.changeRows.replaceChildren();
     if (!payload.rows.length) {
-      emptyRow(nodes.changeRows, "No changes recorded", 6);
+      emptyRow(nodes.changeRows, "No changes recorded", columns);
       return;
     }
     payload.rows.forEach((change) => {
       const row = document.createElement("tr");
+      setCell(row, change.event_label);
       setCell(row, change.license_number);
-      setCell(row, change.event_type);
-      setCell(row, change.field_name);
-      setCell(row, change.old_value);
-      setCell(row, change.new_value);
+      setCell(row, change.description);
       setCell(row, formatDate(change.detected_at));
       nodes.changeRows.appendChild(row);
     });
@@ -2083,18 +2195,12 @@ function loadSyncLogs(options = {}) {
 
 function refreshCurrentDetail(options = {}) {
   if (state.selectedLicense) {
-    return Promise.all([
-      loadProfile(state.selectedLicense, options),
-      loadChanges({ license_number: state.selectedLicense }, options),
-    ]);
+    return loadProfile(state.selectedLicense, options);
   }
   if (state.selectedBrokerage) {
-    return Promise.all([
-      loadBrokerageProfile(state.selectedBrokerage, options),
-      loadChanges({ brokerage: state.selectedBrokerage }, options),
-    ]);
+    return loadBrokerageProfile(state.selectedBrokerage, options);
   }
-  return loadChanges({}, options);
+  return Promise.resolve();
 }
 
 function refreshDashboard(options = {}) {
@@ -2107,6 +2213,7 @@ function refreshDashboard(options = {}) {
   return Promise.all([
     loadSummary(),
     loadResults(options),
+    loadChanges({}, options),
     loadSyncLogs(options),
   ])
     .then(() => refreshCurrentDetail(options))
