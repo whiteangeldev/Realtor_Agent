@@ -2,6 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
+from realtor_agent.normalization import normalize_raw_snapshots
 from realtor_agent.raw_snapshot_store import RawSnapshotStore
 from realtor_agent.source_adapters import BCFSAAlgoliaAdapter
 from realtor_agent.validation import validate_raw_snapshots
@@ -19,8 +20,20 @@ def main() -> None:
     parser.add_argument("--output", type=Path, help="Optional file path to save raw JSON.")
     parser.add_argument("--store-raw", action="store_true", help="Save raw response(s) to SQLite.")
     parser.add_argument("--validate-raw", action="store_true", help="Validate stored raw snapshots.")
+    parser.add_argument("--normalize", action="store_true", help="Normalize valid raw snapshots.")
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH, help="SQLite database path.")
     args = parser.parse_args()
+
+    if args.normalize:
+        summary = normalize_raw_snapshots(args.db_path)
+        print(
+            "Normalized "
+            f"{summary.normalized_records} record(s). "
+            f"Checked: {summary.records_checked}. "
+            f"Skipped: {summary.skipped_records}."
+        )
+        print(f"Normalized rows were stored in normalized_realtors inside {args.db_path}")
+        return
 
     if args.validate_raw:
         summary = validate_raw_snapshots(args.db_path)

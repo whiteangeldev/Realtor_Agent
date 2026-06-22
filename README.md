@@ -138,6 +138,43 @@ validator_version
 
 Good records are only counted for now. They are not inserted into a realtor table yet.
 
+## Step 4: Normalization
+
+Normalize valid BCFSA raw records into one standard shape:
+
+```bash
+realtor-agent --normalize
+```
+
+This creates:
+
+```text
+normalized_realtors
+```
+
+BCFSA fields are converted like this:
+
+```text
+licence_number -> license_number
+business_name  -> brokerage
+location       -> city
+subtype        -> license_level
+services       -> license_category
+objectID       -> source_record_id
+```
+
+Each normalized row stores:
+
+```text
+normalizer_version
+source_fetched_at
+raw_snapshot_id
+record_index
+raw_record
+```
+
+This is still a staging table. Step 5 will save/update the final `realtors` table.
+
 ## Required `.env` Settings
 
 ```env
@@ -149,5 +186,4 @@ BCFSA_ALGOLIA_FILTERS=...
 
 ## Next Step
 
-Step 4 will normalize valid BCFSA records into a standard realtor format and store a
-`normalizer_version`.
+Step 5 will save normalized rows into the final `realtors` table.
