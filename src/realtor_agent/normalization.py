@@ -7,7 +7,7 @@ from typing import Any, Iterable
 
 from realtor_agent.validation import validate_raw_snapshots
 
-NORMALIZER_VERSION = "bcfsa_realtor_normalizer_v1"
+NORMALIZER_VERSION = "bcfsa_realtor_normalizer_v2"
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ def normalize_bcfsa_record(record: dict[str, Any], snapshot: sqlite3.Row) -> dic
         "source": snapshot["source"],
         "source_fetched_at": snapshot["fetched_at"],
         "license_number": _text(record.get("licence_number")),
-        "name": _text(record.get("name")),
+        "name": _format_name(record.get("name")),
         "brokerage": _text(record.get("business_name")),
         "status": _text(record.get("status_flag")) or "Licensed",
         "city": _text(record.get("location")),
@@ -209,3 +209,55 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _format_name(value: Any) -> str | None:
+    text = _text(value)
+    if text is None:
+        return None
+
+    text = _strip_leading_symbols(text)
+    text = _strip_trailing_symbols(text)
+    text = " ".join(text.split())
+    return text or None
+
+
+def _strip_leading_symbols(text: str) -> str:
+    text = text.strip()
+    while text and not text[0].isalnum():
+        text = text[1:].lstrip()
+    return text
+
+
+def _strip_trailing_symbols(text: str) -> str:
+    text = text.strip()
+    while text:
+        cleaned = text
+        cleaned = _strip_trailing_marks(cleaned)
+        cleaned = _strip_trailing_dash(cleaned)
+        cleaned = _strip_trailing_period(cleaned)
+        if cleaned == text:
+            return text
+        text = cleaned.strip()
+    return text
+
+
+def _strip_trailing_marks(text: str) -> str:
+    return text.rstrip(" '\"`,;:)]}")
+
+
+def _strip_trailing_dash(text: str) -> str:
+    return text.rstrip(" -–—")
+
+
+def _strip_trailing_period(text: str) -> str:
+    if not text.endswith(".") or _has_valid_trailing_period(text):
+        return text
+    return text[:-1]
+
+
+def _has_valid_trailing_period(text: str) -> bool:
+    token = text.rsplit(" ", 1)[-1]
+    if len(token) == 2 and token[0].isalpha():
+        return True
+    return token.lower() in {"jr.", "sr."}

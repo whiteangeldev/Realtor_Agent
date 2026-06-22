@@ -163,6 +163,10 @@ services       -> license_category
 objectID       -> source_record_id
 ```
 
+Realtor names are also cleaned for display. Outside symbols such as leading `'`
+or trailing `,`, `.`, and dangling `-` are removed, while real internal
+punctuation such as `Eric J. Adams` or `O'Brien` is preserved.
+
 Each normalized row stores:
 
 ```text
