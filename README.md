@@ -256,6 +256,46 @@ license_level
 license_category
 ```
 
+## Step 7: Dashboard
+
+Start the local dashboard:
+
+```bash
+realtor-agent --dashboard
+```
+
+The dashboard opens a small local web server and reads from:
+
+```text
+data/realtor_agent.db
+```
+
+Current dashboard features:
+
+```text
+search realtor
+search brokerage
+rows per page
+previous/next pagination
+view profile
+view change history
+view sync logs
+export CSV
+```
+
+Dashboard search modes:
+
+```text
+Realtors   -> searches realtor name and licence number
+Brokerages -> shows brokerage rows and searches brokerage name
+```
+
+Optional settings:
+
+```bash
+realtor-agent --dashboard --host 127.0.0.1 --port 8765
+```
+
 ## Required `.env` Settings
 
 ```env
@@ -267,4 +307,4 @@ BCFSA_ALGOLIA_FILTERS=...
 
 ## Next Step
 
-Next step will be a small query/export layer for inspecting realtors and change events.
+After this MVP, the next step should be improving data quality checks and adding another source adapter.
