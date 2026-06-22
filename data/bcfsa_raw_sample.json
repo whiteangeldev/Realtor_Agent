@@ -1,0 +1,68 @@
+{
+  "hits": [
+    {
+      "licence_number": "190470",
+      "bundle": "re_licencee",
+      "expiry_date": 1843016717,
+      "services": [
+        "trading"
+      ],
+      "subtype": "Representative",
+      "name": "Smitha Joe Kundukulam",
+      "secondary_name": "Smitha Joe",
+      "business_name": "Planet Group Realty Inc.",
+      "location": "Surrey",
+      "address": "266 - 8128 128 Street, Surrey",
+      "objectID": "crs_entity/190470",
+      "_highlightResult": {
+        "secondary_name": {
+          "value": "<mark>Smith</mark>a Joe",
+          "matchLevel": "full",
+          "fullyHighlighted": false,
+          "matchedWords": [
+            "smith"
+          ]
+        },
+        "location": {
+          "value": "Surrey",
+          "matchLevel": "none",
+          "matchedWords": []
+        }
+      }
+    },
+    {
+      "licence_number": "075949",
+      "bundle": "re_licencee",
+      "expiry_date": 1789189508,
+      "services": [
+        "trading"
+      ],
+      "subtype": "Representative",
+      "name": "Marijane Smith",
+      "secondary_name": "Marijane Smith Jane Smith",
+      "business_name": "Newport Realty Ltd.",
+      "location": "Victoria",
+      "address": "1144 Fort Street, Victoria",
+      "objectID": "crs_entity/075949",
+      "_highlightResult": {
+        "secondary_name": {
+          "value": "Marijane <mark>Smith</mark> Jane <mark>Smith</mark>",
+          "matchLevel": "full",
+          "fullyHighlighted": false,
+          "matchedWords": [
+            "smith"
+          ]
+        },
+        "location": {
+          "value": "Victoria",
+          "matchLevel": "none",
+          "matchedWords": []
+        }
+      }
+    }
+  ],
+  "nbHits": 117,
+  "page": 0,
+  "nbPages": 59,
+  "hitsPerPage": 2
+}

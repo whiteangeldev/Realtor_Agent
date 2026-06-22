@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "realtor-agent"
+version = "0.1.0"
+description = "Simple BCFSA realtor data pipeline, built step by step."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.27.0",
+]
+
+[project.scripts]
+realtor-agent = "realtor_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
