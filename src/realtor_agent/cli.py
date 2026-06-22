@@ -4,6 +4,7 @@ from pathlib import Path
 
 from realtor_agent.normalization import normalize_raw_snapshots
 from realtor_agent.raw_snapshot_store import RawSnapshotStore
+from realtor_agent.realtor_store import save_realtors_from_normalized
 from realtor_agent.source_adapters import BCFSAAlgoliaAdapter
 from realtor_agent.validation import validate_raw_snapshots
 
@@ -21,8 +22,19 @@ def main() -> None:
     parser.add_argument("--store-raw", action="store_true", help="Save raw response(s) to SQLite.")
     parser.add_argument("--validate-raw", action="store_true", help="Validate stored raw snapshots.")
     parser.add_argument("--normalize", action="store_true", help="Normalize valid raw snapshots.")
+    parser.add_argument("--save-realtors", action="store_true", help="Save normalized rows to realtors.")
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH, help="SQLite database path.")
     args = parser.parse_args()
+
+    if args.save_realtors:
+        summary = save_realtors_from_normalized(args.db_path)
+        print(
+            "Saved realtor records from normalized rows. "
+            f"Checked: {summary.normalized_rows_checked}. "
+            f"Saved/updated: {summary.realtor_rows_saved}. "
+            f"Total realtors: {summary.total_realtors}."
+        )
+        return
 
     if args.normalize:
         summary = normalize_raw_snapshots(args.db_path)

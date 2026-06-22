@@ -175,6 +175,48 @@ raw_record
 
 This is still a staging table. Step 5 will save/update the final `realtors` table.
 
+## Step 5: Save Realtors
+
+Save normalized rows into the final current-state realtor table:
+
+```bash
+realtor-agent --save-realtors
+```
+
+This creates/updates:
+
+```text
+realtors
+```
+
+The `realtors` table stores the current realtor profile:
+
+```text
+license_number
+name
+brokerage
+status
+city
+address
+license_level
+license_category
+source
+source_record_id
+source_fetched_at
+normalizer_version
+first_seen_at
+last_seen_at
+updated_at
+```
+
+Records are matched by:
+
+```text
+license_number
+```
+
+If the same license number already exists, the row is updated instead of duplicated.
+
 ## Required `.env` Settings
 
 ```env
@@ -186,4 +228,4 @@ BCFSA_ALGOLIA_FILTERS=...
 
 ## Next Step
 
-Step 5 will save normalized rows into the final `realtors` table.
+Step 6 will compare old and new realtor values and write `change_events`.
