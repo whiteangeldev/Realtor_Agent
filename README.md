@@ -313,6 +313,10 @@ valid / invalid records
 normalized records
 saved realtors
 change events created
+removed realtors
+whether this was a full sync
+whether removal detection was skipped
+safety warning, if any
 ```
 
 Optional settings:
@@ -320,10 +324,55 @@ Optional settings:
 ```bash
 realtor-agent --scheduled-sync --sync-interval-hours 3
 realtor-agent --sync-now --max-pages 1
+realtor-agent --sync-now --min-full-sync-record-ratio 0.85
 ```
 
 After changing sync code on a server, restart the scheduled sync process so the
 running process uses the latest code.
+
+### Production Auto-Restart
+
+On a VPS, do not rely on a terminal session to keep sync running. Use `systemd`.
+
+Edit the example service:
+
+```bash
+deploy/realtor-agent-sync.service.example
+```
+
+Set:
+
+```text
+User=YOUR_LINUX_USER
+WorkingDirectory=/path/to/Realtor_Agent
+EnvironmentFile=/path/to/Realtor_Agent/.env
+ExecStart=/path/to/Realtor_Agent/.venv/bin/realtor-agent --scheduled-sync
+```
+
+Install and start it:
+
+```bash
+sudo cp deploy/realtor-agent-sync.service.example /etc/systemd/system/realtor-agent-sync.service
+sudo nano /etc/systemd/system/realtor-agent-sync.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now realtor-agent-sync
+sudo systemctl status realtor-agent-sync
+```
+
+Useful logs:
+
+```bash
+journalctl -u realtor-agent-sync -f
+```
+
+With this setup, the scheduled sync starts after server reboot and restarts if
+the process crashes.
+
+If one sync attempt fails because of a temporary API/network problem, the failure
+is logged in `source_runs` and the scheduler waits until the next interval
+instead of tight-looping.
+
+### Partial-Sync Safety Guard
 
 If the dashboard count is higher than the latest source count, run a full sync:
 
@@ -345,6 +394,21 @@ Removed rows are also recorded in `change_events` as:
 ```text
 removed_realtor
 ```
+
+Before marking removals, the sync compares the latest full-sync count with the
+previous successful full-sync baseline. By default, if the latest full sync
+returns below 85% of the baseline, removal detection is skipped.
+
+Example:
+
+```text
+Previous good full sync: 30,000 records
+Latest full sync:        15,000 records
+Result:                  save fetched rows, skip removals, mark run as warning
+```
+
+This prevents a temporary API issue from incorrectly marking thousands of
+realtors as not found.
 
 The dashboard shows current records by default, but the `Record state` filter can
 show `Current`, `Not found`, or `All`.
@@ -389,6 +453,7 @@ previous/next pagination
 view profile
 view human-readable change feed
 view sync logs
+sync warning banner
 export CSV
 auto-refresh every 60 seconds
 ```
@@ -396,6 +461,10 @@ auto-refresh every 60 seconds
 The dashboard reads the SQLite database live. When scheduled sync creates new
 `change_events` or `source_runs`, the browser updates automatically without
 restarting the dashboard server.
+
+If the latest sync fails, returns a suspicious partial result, skips removal
+detection, or becomes stale, the dashboard shows a warning banner and the sync
+log stores the warning message.
 
 The `Changes` metric shows the number of post-baseline `change_events`. It is
 intended to answer "what changed after we started tracking?", while the
@@ -455,6 +524,7 @@ saving normalized realtors
 brokerage rollups
 soft removal / not-found records
 human-readable change descriptions
+partial-sync removal safety
 ```
 
 ## Required `.env` Settings

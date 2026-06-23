@@ -3,6 +3,7 @@ import errno
 import io
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -10,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 DEFAULT_DASHBOARD_PORT = 8765
 DEFAULT_DASHBOARD_HOST = "0.0.0.0"
+DEFAULT_STALE_SYNC_HOURS = 4.0
 
 
 def run_dashboard(
@@ -247,6 +249,7 @@ def _distinct_values(connection: sqlite3.Connection, column_name: str) -> list[s
 def _get_summary(db_path: Path) -> dict:
     with _connect(db_path) as connection:
         _ensure_dashboard_schema(connection)
+        sync_health = _get_sync_health(connection)
         realtor_count = connection.execute(
             "SELECT COUNT(*) FROM realtors WHERE is_currently_found = 1"
         ).fetchone()[0]
@@ -273,7 +276,63 @@ def _get_summary(db_path: Path) -> dict:
         "normalization_errors": error_count,
         "latest_snapshot": latest_snapshot,
         "latest_update": latest_update,
+        "sync_health": sync_health,
     }
+
+
+def _get_sync_health(connection: sqlite3.Connection) -> dict:
+    if not _table_exists(connection, "source_runs"):
+        return {
+            "status": "warning",
+            "message": "No sync runs have been recorded yet.",
+        }
+
+    _ensure_source_runs_schema(connection)
+    latest = connection.execute(
+        """
+        SELECT
+            status,
+            started_at,
+            finished_at,
+            removal_detection_skipped,
+            safety_warning,
+            error_message
+        FROM source_runs
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if latest is None:
+        return {
+            "status": "warning",
+            "message": "No sync runs have been recorded yet.",
+        }
+
+    if latest["status"] == "failed":
+        message = latest["error_message"] or "Latest sync failed."
+        return {"status": "warning", "message": message}
+
+    if latest["status"] == "warning":
+        message = latest["safety_warning"] or "Latest sync completed with a warning."
+        return {"status": "warning", "message": message}
+
+    if latest["status"] == "running":
+        started_at = _parse_datetime(latest["started_at"])
+        if started_at and datetime.now(UTC) - started_at > timedelta(hours=DEFAULT_STALE_SYNC_HOURS):
+            return {
+                "status": "warning",
+                "message": f"Latest sync has been running since {latest['started_at']}.",
+            }
+        return {"status": "ok", "message": "Sync is currently running."}
+
+    finished_at = _parse_datetime(latest["finished_at"])
+    if finished_at and datetime.now(UTC) - finished_at > timedelta(hours=DEFAULT_STALE_SYNC_HOURS):
+        return {
+            "status": "warning",
+            "message": f"No completed sync in more than {DEFAULT_STALE_SYNC_HOURS:g} hours.",
+        }
+
+    return {"status": "ok", "message": "Latest sync completed successfully."}
 
 
 def _get_filter_options(db_path: Path) -> dict:
@@ -501,12 +560,7 @@ def _get_sync_logs(db_path: Path, params: dict[str, list[str]]) -> dict:
     with _connect(db_path) as connection:
         if not _table_exists(connection, "source_runs"):
             return {"rows": []}
-        _add_column_if_missing(
-            connection,
-            table_name="source_runs",
-            column_name="removed_realtors",
-            column_sql="INTEGER NOT NULL DEFAULT 0",
-        )
+        _ensure_source_runs_schema(connection)
 
         rows = connection.execute(
             """
@@ -524,6 +578,9 @@ def _get_sync_logs(db_path: Path, params: dict[str, list[str]]) -> dict:
                 realtor_rows_saved,
                 change_events_created,
                 removed_realtors,
+                is_full_sync,
+                removal_detection_skipped,
+                safety_warning,
                 error_message
             FROM source_runs
             ORDER BY started_at DESC, id DESC
@@ -813,6 +870,45 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return {key: row[key] for key in row.keys()}
 
 
+def _ensure_source_runs_schema(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(
+        connection,
+        table_name="source_runs",
+        column_name="removed_realtors",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(
+        connection,
+        table_name="source_runs",
+        column_name="is_full_sync",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(
+        connection,
+        table_name="source_runs",
+        column_name="removal_detection_skipped",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(
+        connection,
+        table_name="source_runs",
+        column_name="safety_warning",
+        column_sql="TEXT",
+    )
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -836,6 +932,8 @@ HTML = """<!doctype html>
   </header>
 
   <main>
+    <div id="healthBanner" class="health-banner hidden"></div>
+
     <section class="metrics" aria-label="Database summary">
       <div class="metric">
         <span>Realtors</span>
@@ -987,6 +1085,7 @@ HTML = """<!doctype html>
                 <th>Valid / Invalid</th>
                 <th>Removed</th>
                 <th>Changes</th>
+                <th>Message</th>
               </tr>
             </thead>
             <tbody id="syncRows"></tbody>
@@ -1127,6 +1226,17 @@ main {
   color: var(--ink);
   font-size: 25px;
   line-height: 1;
+}
+
+.health-banner {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid #d7aa52;
+  border-radius: 6px;
+  background: #fff7e8;
+  color: #6d4b12;
+  font-size: 13px;
+  font-weight: 720;
 }
 
 .workspace {
@@ -1642,6 +1752,7 @@ const nodes = {
   metricBrokerages: document.getElementById("metricBrokerages"),
   metricChanges: document.getElementById("metricChanges"),
   metricSnapshots: document.getElementById("metricSnapshots"),
+  healthBanner: document.getElementById("healthBanner"),
 };
 
 nodes.searchForm.addEventListener("submit", (event) => {
@@ -1847,7 +1958,18 @@ function loadSummary() {
     nodes.metricChanges.textContent = summary.changes.toLocaleString();
     nodes.metricSnapshots.textContent = summary.raw_snapshots.toLocaleString();
     nodes.lastUpdated.textContent = `Latest sync: ${formatDate(summary.latest_snapshot)} | Errors: ${summary.normalization_errors}`;
+    renderSyncHealth(summary.sync_health);
   });
+}
+
+function renderSyncHealth(health) {
+  if (!health || health.status === "ok") {
+    nodes.healthBanner.classList.add("hidden");
+    nodes.healthBanner.textContent = "";
+    return;
+  }
+  nodes.healthBanner.classList.remove("hidden");
+  nodes.healthBanner.textContent = health.message;
 }
 
 function loadFilterOptions() {
@@ -2176,7 +2298,7 @@ function loadChanges(filters = {}, options = {}) {
 }
 
 function loadSyncLogs(options = {}) {
-  const columns = 7;
+  const columns = 8;
   if (!options.silent) {
     emptyRow(nodes.syncRows, "Loading...", columns);
   }
@@ -2195,6 +2317,7 @@ function loadSyncLogs(options = {}) {
       setCell(row, `${log.valid_records.toLocaleString()} / ${log.invalid_records.toLocaleString()}`);
       setCell(row, log.removed_realtors);
       setCell(row, log.change_events_created);
+      setCell(row, log.safety_warning || log.error_message || "");
       nodes.syncRows.appendChild(row);
     });
   });

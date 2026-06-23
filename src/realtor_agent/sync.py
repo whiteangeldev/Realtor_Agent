@@ -11,17 +11,28 @@ from realtor_agent.source_adapters import BCFSAAlgoliaAdapter
 from realtor_agent.validation import ValidationSummary, validate_raw_snapshots
 
 DEFAULT_SYNC_INTERVAL_HOURS = 3.0
+DEFAULT_MIN_FULL_SYNC_RECORD_RATIO = 0.85
 
 
 @dataclass(frozen=True)
 class SyncSummary:
     run_id: int
+    status: str
     raw_snapshots_stored: int
     validation: ValidationSummary
     normalization: NormalizationSummary
     realtor_save: RealtorSaveSummary
+    removal_detection_skipped: bool
+    safety_warning: str | None
     started_at: str
     finished_at: str
+
+
+@dataclass(frozen=True)
+class SyncSafetyResult:
+    detect_removals: bool
+    removal_detection_skipped: bool
+    warning: str | None
 
 
 def run_sync_once(
@@ -31,9 +42,16 @@ def run_sync_once(
     hits_per_page: int = 1000,
     max_pages: int | None = None,
     trigger: str = "manual",
+    min_full_sync_record_ratio: float = DEFAULT_MIN_FULL_SYNC_RECORD_RATIO,
 ) -> SyncSummary:
     started_at = datetime.now(UTC).isoformat()
-    run_id = _start_source_run(db_path, trigger=trigger, started_at=started_at)
+    is_full_sync = _should_detect_removals(query=query, max_pages=max_pages)
+    run_id = _start_source_run(
+        db_path,
+        trigger=trigger,
+        started_at=started_at,
+        is_full_sync=is_full_sync,
+    )
     raw_snapshots_stored = 0
     raw_snapshot_ids: list[int] = []
 
@@ -56,31 +74,44 @@ def run_sync_once(
             validate_first=False,
             raw_snapshot_ids=raw_snapshot_ids,
         )
+        safety = _evaluate_sync_safety(
+            db_path=db_path,
+            run_id=run_id,
+            is_full_sync=is_full_sync,
+            normalized_records=normalization.normalized_records,
+            min_full_sync_record_ratio=min_full_sync_record_ratio,
+        )
         realtor_save = save_realtors_from_normalized(
             db_path,
-            detect_removals=_should_detect_removals(query=query, max_pages=max_pages),
+            detect_removals=safety.detect_removals,
             source_run_id=run_id,
         )
         finished_at = datetime.now(UTC).isoformat()
+        status = "warning" if safety.warning else "success"
 
         _finish_source_run(
             db_path,
             run_id=run_id,
-            status="success",
+            status=status,
             finished_at=finished_at,
             raw_snapshots_stored=raw_snapshots_stored,
             validation=validation,
             normalization=normalization,
             realtor_save=realtor_save,
+            removal_detection_skipped=safety.removal_detection_skipped,
+            safety_warning=safety.warning,
             error_message=None,
         )
 
         return SyncSummary(
             run_id=run_id,
+            status=status,
             raw_snapshots_stored=raw_snapshots_stored,
             validation=validation,
             normalization=normalization,
             realtor_save=realtor_save,
+            removal_detection_skipped=safety.removal_detection_skipped,
+            safety_warning=safety.warning,
             started_at=started_at,
             finished_at=finished_at,
         )
@@ -94,6 +125,8 @@ def run_sync_once(
             validation=None,
             normalization=None,
             realtor_save=None,
+            removal_detection_skipped=False,
+            safety_warning=None,
             error_message=str(error),
         )
         raise
@@ -106,6 +139,7 @@ def run_scheduled_sync(
     query: str = "",
     hits_per_page: int = 1000,
     max_pages: int | None = None,
+    min_full_sync_record_ratio: float = DEFAULT_MIN_FULL_SYNC_RECORD_RATIO,
 ) -> None:
     interval_seconds = max(60, int(interval_hours * 60 * 60))
     print(
@@ -118,14 +152,18 @@ def run_scheduled_sync(
         while True:
             started = datetime.now(UTC)
             print(f"\n[{started.isoformat()}] Running scheduled sync...", flush=True)
-            summary = run_sync_once(
-                db_path=db_path,
-                query=query,
-                hits_per_page=hits_per_page,
-                max_pages=max_pages,
-                trigger="scheduled",
-            )
-            _print_sync_summary(summary)
+            try:
+                summary = run_sync_once(
+                    db_path=db_path,
+                    query=query,
+                    hits_per_page=hits_per_page,
+                    max_pages=max_pages,
+                    min_full_sync_record_ratio=min_full_sync_record_ratio,
+                    trigger="scheduled",
+                )
+                _print_sync_summary(summary)
+            except Exception as error:
+                print(f"Scheduled sync failed: {error}", flush=True)
 
             next_run = started + timedelta(seconds=interval_seconds)
             print(f"Next sync: {next_run.isoformat()}", flush=True)
@@ -138,6 +176,7 @@ def _print_sync_summary(summary: SyncSummary) -> None:
     print(
         "Sync complete. "
         f"Run ID: {summary.run_id}. "
+        f"Status: {summary.status}. "
         f"Raw snapshots: {summary.raw_snapshots_stored}. "
         f"Valid records: {summary.validation.valid_records}. "
         f"Invalid records: {summary.validation.invalid_records}. "
@@ -147,10 +186,90 @@ def _print_sync_summary(summary: SyncSummary) -> None:
         f"Change events: {summary.realtor_save.change_events_created}.",
         flush=True,
     )
+    if summary.safety_warning:
+        print(f"Warning: {summary.safety_warning}", flush=True)
 
 
 def _should_detect_removals(*, query: str, max_pages: int | None) -> bool:
     return query == "" and max_pages is None
+
+
+def _evaluate_sync_safety(
+    *,
+    db_path: Path,
+    run_id: int,
+    is_full_sync: bool,
+    normalized_records: int,
+    min_full_sync_record_ratio: float,
+) -> SyncSafetyResult:
+    if not is_full_sync:
+        return SyncSafetyResult(
+            detect_removals=False,
+            removal_detection_skipped=True,
+            warning=None,
+        )
+
+    baseline_records = _baseline_full_sync_record_count(db_path, exclude_run_id=run_id)
+    if baseline_records is None or baseline_records == 0:
+        return SyncSafetyResult(
+            detect_removals=True,
+            removal_detection_skipped=False,
+            warning=None,
+        )
+
+    minimum_expected = int(baseline_records * min_full_sync_record_ratio)
+    if normalized_records >= minimum_expected:
+        return SyncSafetyResult(
+            detect_removals=True,
+            removal_detection_skipped=False,
+            warning=None,
+        )
+
+    percent = min_full_sync_record_ratio * 100
+    warning = (
+        "Removal detection skipped: latest full sync normalized "
+        f"{normalized_records:,} records, below {percent:.0f}% of the previous full-sync "
+        f"baseline ({baseline_records:,}). Existing current realtor rows were not marked "
+        "as not found."
+    )
+    return SyncSafetyResult(
+        detect_removals=False,
+        removal_detection_skipped=True,
+        warning=warning,
+    )
+
+
+def _baseline_full_sync_record_count(db_path: Path, *, exclude_run_id: int) -> int | None:
+    with sqlite3.connect(db_path) as connection:
+        _setup_source_runs_table(connection)
+        row = connection.execute(
+            """
+            SELECT normalized_records
+            FROM source_runs
+            WHERE id != ?
+              AND is_full_sync = 1
+              AND status = 'success'
+              AND normalized_records > 0
+            ORDER BY finished_at DESC, id DESC
+            LIMIT 1
+            """,
+            (exclude_run_id,),
+        ).fetchone()
+        if row:
+            return int(row[0])
+
+        if _table_exists(connection, "realtors"):
+            row = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM realtors
+                WHERE is_currently_found = 1
+                """
+            ).fetchone()
+            if row and row[0] > 0:
+                return int(row[0])
+
+    return None
 
 
 def _setup_source_runs_table(connection: sqlite3.Connection) -> None:
@@ -171,6 +290,9 @@ def _setup_source_runs_table(connection: sqlite3.Connection) -> None:
             realtor_rows_saved INTEGER NOT NULL DEFAULT 0,
             change_events_created INTEGER NOT NULL DEFAULT 0,
             removed_realtors INTEGER NOT NULL DEFAULT 0,
+            is_full_sync INTEGER NOT NULL DEFAULT 0,
+            removal_detection_skipped INTEGER NOT NULL DEFAULT 0,
+            safety_warning TEXT,
             error_message TEXT
         )
         """
@@ -181,9 +303,33 @@ def _setup_source_runs_table(connection: sqlite3.Connection) -> None:
         column_name="removed_realtors",
         column_sql="INTEGER NOT NULL DEFAULT 0",
     )
+    _add_column_if_missing(
+        connection,
+        table_name="source_runs",
+        column_name="is_full_sync",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(
+        connection,
+        table_name="source_runs",
+        column_name="removal_detection_skipped",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(
+        connection,
+        table_name="source_runs",
+        column_name="safety_warning",
+        column_sql="TEXT",
+    )
 
 
-def _start_source_run(db_path: Path, *, trigger: str, started_at: str) -> int:
+def _start_source_run(
+    db_path: Path,
+    *,
+    trigger: str,
+    started_at: str,
+    is_full_sync: bool,
+) -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as connection:
         _setup_source_runs_table(connection)
@@ -193,11 +339,12 @@ def _start_source_run(db_path: Path, *, trigger: str, started_at: str) -> int:
                 source,
                 trigger,
                 status,
-                started_at
+                started_at,
+                is_full_sync
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            ("BCFSA", trigger, "running", started_at),
+            ("BCFSA", trigger, "running", started_at, int(is_full_sync)),
         )
         return int(cursor.lastrowid)
 
@@ -212,6 +359,8 @@ def _finish_source_run(
     validation: ValidationSummary | None,
     normalization: NormalizationSummary | None,
     realtor_save: RealtorSaveSummary | None,
+    removal_detection_skipped: bool,
+    safety_warning: str | None,
     error_message: str | None,
 ) -> None:
     with sqlite3.connect(db_path) as connection:
@@ -230,6 +379,8 @@ def _finish_source_run(
                 realtor_rows_saved = ?,
                 change_events_created = ?,
                 removed_realtors = ?,
+                removal_detection_skipped = ?,
+                safety_warning = ?,
                 error_message = ?
             WHERE id = ?
             """,
@@ -244,6 +395,8 @@ def _finish_source_run(
                 realtor_save.realtor_rows_saved if realtor_save else 0,
                 realtor_save.change_events_created if realtor_save else 0,
                 realtor_save.removed_realtors if realtor_save else 0,
+                int(removal_detection_skipped),
+                safety_warning,
                 error_message,
                 run_id,
             ),
@@ -262,3 +415,15 @@ def _add_column_if_missing(
     }
     if column_name not in columns:
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = ?
+        """,
+        (table_name,),
+    ).fetchone()
+    return row is not None

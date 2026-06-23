@@ -7,7 +7,12 @@ from realtor_agent.normalization import normalize_raw_snapshots
 from realtor_agent.raw_snapshot_store import RawSnapshotStore
 from realtor_agent.realtor_store import save_realtors_from_normalized
 from realtor_agent.source_adapters import BCFSAAlgoliaAdapter
-from realtor_agent.sync import DEFAULT_SYNC_INTERVAL_HOURS, run_scheduled_sync, run_sync_once
+from realtor_agent.sync import (
+    DEFAULT_MIN_FULL_SYNC_RECORD_RATIO,
+    DEFAULT_SYNC_INTERVAL_HOURS,
+    run_scheduled_sync,
+    run_sync_once,
+)
 from realtor_agent.validation import validate_raw_snapshots
 
 DEFAULT_DB_PATH = Path("data/realtor_agent.db")
@@ -40,6 +45,12 @@ def main() -> None:
         default=DEFAULT_SYNC_HITS_PER_PAGE,
         help="Records per BCFSA API page during full sync.",
     )
+    parser.add_argument(
+        "--min-full-sync-record-ratio",
+        type=float,
+        default=DEFAULT_MIN_FULL_SYNC_RECORD_RATIO,
+        help="Skip removal detection when a full sync returns below this ratio of the baseline.",
+    )
     parser.add_argument("--dashboard", action="store_true", help="Start the local dashboard.")
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH, help="SQLite database path.")
     parser.add_argument("--host", default=DEFAULT_DASHBOARD_HOST, help="Dashboard host.")
@@ -57,6 +68,7 @@ def main() -> None:
             query=args.query,
             hits_per_page=args.sync_hits_per_page,
             max_pages=args.max_pages,
+            min_full_sync_record_ratio=args.min_full_sync_record_ratio,
         )
         return
 
@@ -66,11 +78,13 @@ def main() -> None:
             query=args.query,
             hits_per_page=args.sync_hits_per_page,
             max_pages=args.max_pages,
+            min_full_sync_record_ratio=args.min_full_sync_record_ratio,
             trigger="manual",
         )
         print(
             "Sync complete. "
             f"Run ID: {summary.run_id}. "
+            f"Status: {summary.status}. "
             f"Raw snapshots: {summary.raw_snapshots_stored}. "
             f"Valid records: {summary.validation.valid_records}. "
             f"Invalid records: {summary.validation.invalid_records}. "
@@ -79,6 +93,8 @@ def main() -> None:
             f"Removed: {summary.realtor_save.removed_realtors}. "
             f"Change events: {summary.realtor_save.change_events_created}."
         )
+        if summary.safety_warning:
+            print(f"Warning: {summary.safety_warning}")
         return
 
     if args.save_realtors:

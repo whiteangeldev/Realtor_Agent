@@ -1,0 +1,16 @@
+[Unit]
+Description=Realtor Agent scheduled sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+WorkingDirectory=/opt/realtor-agent
+EnvironmentFile=/opt/realtor-agent/.env
+ExecStart=/opt/realtor-agent/.venv/bin/realtor-agent --scheduled-sync
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
