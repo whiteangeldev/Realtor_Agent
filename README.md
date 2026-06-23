@@ -1,533 +1,30 @@
 # Realtor Agent
 
-Simple realtor data pipeline, built one step at a time.
+Realtor Agent syncs BCFSA realtor data into SQLite, tracks meaningful profile
+changes over time, and serves a small browser dashboard for searching realtors,
+brokerages, sync logs, and change history.
 
-## MVP Flow
+## Features
 
-```text
-BCFSA Adapter
-  -> Raw Snapshot
-  -> Validation
-  -> Normalizer
-  -> Realtors Table
-  -> Change Events
-```
-
-## Step 1: Fetch Data
-
-Current code only does this:
-
-```text
-BCFSA Algolia API -> Source Adapter Layer -> raw JSON
-```
-
-Step 1 does not validate, normalize, or save realtor records.
-
-Current source adapter:
-
-```text
-source_adapters/base.py
-  -> SourceAdapter contract
-
-source_adapters/bcfsa_algolia.py
-  -> BCFSAAlgoliaAdapter
-```
+- Fetches realtor records from the BCFSA Algolia source.
+- Stores raw snapshots, normalized rows, current realtor profiles, brokerages,
+  sync runs, and change events in `data/realtor_agent.db`.
+- Treats the first import as the baseline, so the initial dataset does not
+  create thousands of fake `new_realtor` changes.
+- Runs one-time syncs or a scheduled sync loop.
+- Provides a dashboard with realtor search, brokerage search, profile details,
+  CSV export, change history, and sync health warnings.
 
 ## Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e .
+python -m pip install -e ".[dev]"
+cp .env.example .env
 ```
 
-The BCFSA API settings live in `.env`.
-
-## Fetch A Sample Page
-
-```bash
-realtor-agent --query smith --hits-per-page 2
-```
-
-Save the raw API response to a file:
-
-```bash
-realtor-agent --query smith --hits-per-page 2 --output data/bcfsa_raw_sample.json
-```
-
-## Fetch All Realtor Search Records
-
-Use an empty query and `--all`:
-
-```bash
-realtor-agent --all --hits-per-page 1000 --output data/bcfsa_all_raw.json
-```
-
-For a small test run, add a page limit:
-
-```bash
-realtor-agent --all --hits-per-page 1000 --max-pages 2 --output data/bcfsa_first_2_pages.json
-```
-
-This still stores raw API data only. Step 2 will save this into `raw_snapshots`.
-
-## Step 2: Raw Snapshot Store
-
-Store raw BCFSA page responses in SQLite before validation or normalization:
-
-```bash
-realtor-agent --query smith --hits-per-page 2 --store-raw
-```
-
-Store multiple raw pages:
-
-```bash
-realtor-agent --all --hits-per-page 1000 --store-raw
-```
-
-This creates:
-
-```text
-data/realtor_agent.db
-  raw_snapshots
-```
-
-The `raw_snapshots` table stores:
-
-```text
-source
-adapter_version
-endpoint
-query_params
-raw_json
-response_hash
-fetch_status
-fetched_at
-```
-
-## Step 3: Validation
-
-Validate stored raw snapshots before normalizing or saving realtor records:
-
-```bash
-realtor-agent --validate-raw
-```
-
-Validation checks each raw realtor record for:
-
-```text
-licence number
-name
-brokerage name
-source timestamp
-malformed record shape
-basic field types
-```
-
-Bad records are written to:
-
-```text
-normalization_errors
-```
-
-Each validation error also stores:
-
-```text
-validator_version
-```
-
-Good records are only counted for now. They are not inserted into a realtor table yet.
-
-## Step 4: Normalization
-
-Normalize valid BCFSA raw records into one standard shape:
-
-```bash
-realtor-agent --normalize
-```
-
-This creates:
-
-```text
-normalized_realtors
-```
-
-BCFSA fields are converted like this:
-
-```text
-licence_number -> license_number
-business_name  -> brokerage
-location       -> city
-subtype        -> license_level
-services       -> license_category
-objectID       -> source_record_id
-```
-
-Realtor names are also cleaned for display. Outside symbols such as leading `'`
-or trailing `,`, `.`, and dangling `-` are removed, while real internal
-punctuation such as `Eric J. Adams` or `O'Brien` is preserved.
-
-Each normalized row stores:
-
-```text
-normalizer_version
-source_fetched_at
-raw_snapshot_id
-record_index
-raw_record
-```
-
-This is still a staging table. Step 5 will save/update the final `realtors` table.
-
-## Step 5: Save Realtors
-
-Save normalized rows into the final current-state realtor table:
-
-```bash
-realtor-agent --save-realtors
-```
-
-This creates/updates:
-
-```text
-realtors
-```
-
-The `realtors` table stores the current realtor profile:
-
-```text
-license_number
-name
-brokerage
-status
-city
-address
-license_level
-license_category
-source
-source_record_id
-source_fetched_at
-normalizer_version
-first_seen_at
-last_seen_at
-is_currently_found
-removed_at
-last_seen_run_id
-updated_at
-```
-
-Records are matched by:
-
-```text
-license_number
-```
-
-If the same license number already exists, the row is updated instead of duplicated.
-
-## Step 6: Change Detection
-
-Change detection runs during:
-
-```bash
-realtor-agent --save-realtors
-```
-
-Before updating a realtor row, the system compares the existing `realtors` row with the
-latest normalized row for that license number.
-
-The first save into an empty `realtors` table is treated as the baseline import.
-It creates current realtor rows, but it does not write one `new_realtor` change
-for every initial record. After that baseline exists, newly appearing licence
-numbers are recorded as `new_realtor` events.
-
-It writes changes into:
-
-```text
-change_events
-```
-
-Detected events include:
-
-```text
-new_realtor
-brokerage_changed
-status_changed
-location_changed
-profile_changed
-removed_realtor
-reappeared_realtor
-```
-
-Tracked fields:
-
-```text
-name
-brokerage
-status
-city
-address
-license_level
-license_category
-```
-
-## Step 7: Scheduled Sync Trigger
-
-Run the full pipeline once:
-
-```bash
-realtor-agent --sync-now
-```
-
-Run the full pipeline now, then automatically repeat every 3 hours:
-
-```bash
-realtor-agent --scheduled-sync
-```
-
-The scheduled sync runs:
-
-```text
-BCFSA API
-  -> Raw Snapshot Store
-  -> Validation
-  -> Normalization
-  -> Realtors Table
-  -> Change Detection
-```
-
-Each sync run is logged in:
-
-```text
-source_runs
-```
-
-The run log stores:
-
-```text
-trigger
-status
-started_at
-finished_at
-raw snapshots stored
-valid / invalid records
-normalized records
-saved realtors
-change events created
-removed realtors
-whether this was a full sync
-whether removal detection was skipped
-safety warning, if any
-```
-
-Optional settings:
-
-```bash
-realtor-agent --scheduled-sync --sync-interval-hours 3
-realtor-agent --sync-now --max-pages 1
-realtor-agent --sync-now --min-full-sync-record-ratio 0.85
-```
-
-After changing sync code on a server, restart the scheduled sync process so the
-running process uses the latest code.
-
-### Production Auto-Restart
-
-On a VPS, do not rely on a terminal session to keep sync running. Use `systemd`.
-
-Edit the example service:
-
-```bash
-deploy/realtor-agent-sync.service.example
-```
-
-Set:
-
-```text
-User=YOUR_LINUX_USER
-WorkingDirectory=/path/to/Realtor_Agent
-EnvironmentFile=/path/to/Realtor_Agent/.env
-ExecStart=/path/to/Realtor_Agent/.venv/bin/realtor-agent --scheduled-sync
-```
-
-Install and start it:
-
-```bash
-sudo cp deploy/realtor-agent-sync.service.example /etc/systemd/system/realtor-agent-sync.service
-sudo nano /etc/systemd/system/realtor-agent-sync.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now realtor-agent-sync
-sudo systemctl status realtor-agent-sync
-```
-
-Useful logs:
-
-```bash
-journalctl -u realtor-agent-sync -f
-```
-
-With this setup, the scheduled sync starts after server reboot and restarts if
-the process crashes.
-
-If one sync attempt fails because of a temporary API/network problem, the failure
-is logged in `source_runs` and the scheduler waits until the next interval
-instead of tight-looping.
-
-### Partial-Sync Safety Guard
-
-If the dashboard count is higher than the latest source count, run a full sync:
-
-```bash
-realtor-agent --sync-now
-```
-
-A full sync normalizes only the raw pages from that sync and removes realtor rows
-that no longer exist in the latest BCFSA result set from the current directory.
-The row is not deleted. It is marked as:
-
-```text
-is_currently_found = 0
-removed_at = timestamp
-```
-
-Removed rows are also recorded in `change_events` as:
-
-```text
-removed_realtor
-```
-
-Before marking removals, the sync compares the latest full-sync count with the
-previous successful full-sync baseline. By default, if the latest full sync
-returns below 85% of the baseline, removal detection is skipped.
-
-Example:
-
-```text
-Previous good full sync: 30,000 records
-Latest full sync:        15,000 records
-Result:                  save fetched rows, skip removals, mark run as warning
-```
-
-This prevents a temporary API issue from incorrectly marking thousands of
-realtors as not found.
-
-The dashboard shows current records by default, but the `Record state` filter can
-show `Current`, `Not found`, or `All`.
-
-## Step 8: Dashboard
-
-Start the local dashboard:
-
-```bash
-realtor-agent --dashboard
-```
-
-The dashboard opens a small web server on all network interfaces by default:
-
-```text
-0.0.0.0:8765
-```
-
-On a VPS, open it from your browser with:
-
-```text
-http://YOUR_IP:8765
-```
-
-The dashboard reads from:
-
-```text
-data/realtor_agent.db
-```
-
-Current dashboard features:
-
-```text
-search realtor
-search brokerage
-filter by record state
-filter by licence status
-filter by city
-filter by licence category
-rows per page
-previous/next pagination
-view profile
-view human-readable change feed
-view sync logs
-sync warning banner
-export CSV
-auto-refresh every 60 seconds
-```
-
-The dashboard reads the SQLite database live. When scheduled sync creates new
-`change_events` or `source_runs`, the browser updates automatically without
-restarting the dashboard server.
-
-If the latest sync fails, returns a suspicious partial result, skips removal
-detection, or becomes stale, the dashboard shows a warning banner and the sync
-log stores the warning message.
-
-The `Changes` metric shows the number of post-baseline `change_events`. It is
-intended to answer "what changed after we started tracking?", while the
-`Realtors` metric shows the current directory size.
-
-The raw audit data still stays in `change_events`. The dashboard adds readable
-messages such as:
-
-```text
-John Smith changed brokerage from ABC Realty to Elite Realty.
-Jane Lee was not found in the latest full BCFSA sync.
-```
-
-Dashboard search modes:
-
-```text
-Realtors   -> searches realtor name and licence number
-Brokerages -> shows brokerage rows and searches brokerage name
-```
-
-The `brokerages` table is rebuilt from saved realtor records after each sync. It
-stores:
-
-```text
-brokerage
-public_address
-public_phone
-managing_broker
-current_realtor_count
-not_found_realtor_count
-total_realtor_count
-city_count
-updated_at
-```
-
-Optional settings:
-
-```bash
-realtor-agent --dashboard --port 8765
-realtor-agent --dashboard --host 127.0.0.1 --port 8765
-```
-
-Use `--host 127.0.0.1` only when you intentionally want local-only access.
-
-## Automated Tests
-
-Run the basic regression tests:
-
-```bash
-.venv/bin/python -m pytest
-```
-
-Current tests cover:
-
-```text
-saving normalized realtors
-brokerage rollups
-soft removal / not-found records
-human-readable change descriptions
-partial-sync removal safety
-```
-
-## Required `.env` Settings
+Fill in `.env`:
 
 ```env
 BCFSA_ALGOLIA_APP_ID=...
@@ -536,6 +33,106 @@ BCFSA_ALGOLIA_INDEX=...
 BCFSA_ALGOLIA_FILTERS=...
 ```
 
-## Next Step
+## Run
 
-After this MVP, the next step should be improving data quality checks and adding another source adapter.
+Run one full sync:
+
+```bash
+realtor-agent --sync-now
+```
+
+Run sync now, then repeat every 3 hours:
+
+```bash
+realtor-agent --scheduled-sync
+```
+
+Start the dashboard:
+
+```bash
+realtor-agent --dashboard --host 0.0.0.0 --port 9421
+```
+
+Open:
+
+```text
+http://YOUR_SERVER_IP:9421
+```
+
+Useful options:
+
+```bash
+realtor-agent --scheduled-sync --sync-interval-hours 3
+realtor-agent --sync-now --max-pages 1
+realtor-agent --sync-now --min-full-sync-record-ratio 0.85
+realtor-agent --dashboard --host 127.0.0.1 --port 9421
+```
+
+## Data Flow
+
+```text
+BCFSA API
+  -> raw_snapshots
+  -> normalized_realtors
+  -> realtors
+  -> brokerages
+  -> change_events
+  -> source_runs
+```
+
+`realtors` stores the current profile state. `change_events` stores changes
+found after the baseline import, such as brokerage, location, status, profile,
+new realtor, removed realtor, and reappeared realtor events. `source_runs`
+stores sync status, counts, warnings, and errors.
+
+The sync has a partial-result safety guard. If a full sync returns far fewer
+records than the previous good full sync, it saves the fetched rows but skips
+removal detection so a temporary API issue does not mark thousands of realtors
+as not found.
+
+## Production
+
+Run both long-lived processes with systemd:
+
+```text
+deploy/realtor-agent-sync.service.example
+deploy/realtor-agent-dashboard.service.example
+```
+
+Copy both examples, edit `User`, `WorkingDirectory`, `EnvironmentFile`, and the
+absolute paths in `ExecStart`, then enable them:
+
+```bash
+sudo cp deploy/realtor-agent-sync.service.example /etc/systemd/system/realtor-agent-sync.service
+sudo cp deploy/realtor-agent-dashboard.service.example /etc/systemd/system/realtor-agent-dashboard.service
+sudo nano /etc/systemd/system/realtor-agent-sync.service
+sudo nano /etc/systemd/system/realtor-agent-dashboard.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now realtor-agent-sync realtor-agent-dashboard
+sudo systemctl status realtor-agent-sync realtor-agent-dashboard --no-pager -l
+```
+
+Common operations:
+
+```bash
+journalctl -u realtor-agent-sync -f
+journalctl -u realtor-agent-dashboard -f
+sudo systemctl restart realtor-agent-sync realtor-agent-dashboard
+```
+
+## Development
+
+Run tests:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+Run pipeline stages manually when debugging:
+
+```bash
+realtor-agent --query smith --hits-per-page 2 --store-raw
+realtor-agent --validate-raw
+realtor-agent --normalize
+realtor-agent --save-realtors
+```
